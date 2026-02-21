@@ -52,7 +52,7 @@ CharacterController:
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Height: 2
+  m_Height: 1.7
   m_Radius: 0.5
   m_SlopeLimit: 45
   m_StepOffset: 0.3
@@ -88,11 +88,11 @@ MonoBehaviour:
   minPitch: -82
   maxPitch: 86
   toggleCrouch: 0
-  standingHeight: 1.8
+  standingHeight: 1.6
   crouchingHeight: 0.6
   crouchTransitionSpeed: 12
-  standingCameraHeight: 0.82
-  crouchingCameraHeight: 0.48
+  standingCameraHeight: 1.45
+  crouchingCameraHeight: 0.4
   leanAngle: 10
   leanOffset: 1
   leanSmooth: 20
