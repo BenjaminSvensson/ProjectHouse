@@ -1,6 +1,11 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
 
+public interface IInteractable
+{
+    void Interact();
+}
+
 [RequireComponent(typeof(CharacterController))]
 public class PlayerController : MonoBehaviour
 {
@@ -65,6 +70,11 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float cameraCollisionRadius = 0.12f;
     [SerializeField] private float cameraCollisionPadding = 0.02f;
 
+    [Header("Interaction")]
+    [SerializeField] private float interactionDistance = 2.5f;
+    [SerializeField] private float interactionRadius = 0.08f;
+    [SerializeField] private LayerMask interactionMask = ~0;
+
     private CharacterController _controller;
     private InputSystem_Actions _actions;
 
@@ -98,6 +108,7 @@ public class PlayerController : MonoBehaviour
     private float _landingRotationImpulse;
     private readonly RaycastHit[] _cameraCollisionHits = new RaycastHit[8];
     private readonly Collider[] _cameraOverlapHits = new Collider[16];
+    private readonly RaycastHit[] _interactionHits = new RaycastHit[16];
 
     private void Awake()
     {
@@ -166,6 +177,7 @@ public class PlayerController : MonoBehaviour
     private void Update()
     {
         ReadInput();
+        HandleInteraction();
         HandleLook(Time.deltaTime);
         HandleMovement(Time.deltaTime);
         HandleZoom(Time.deltaTime);
@@ -292,6 +304,59 @@ public class PlayerController : MonoBehaviour
         {
             playerCamera.fieldOfView = Mathf.Lerp(playerCamera.fieldOfView, _targetFov, 1f - Mathf.Exp(-zoomSmooth * deltaTime));
         }
+    }
+
+    private void HandleInteraction()
+    {
+        if (!_actions.Player.Interact.WasPressedThisFrame())
+        {
+            return;
+        }
+
+        if (playerCamera == null)
+        {
+            return;
+        }
+
+        Transform cameraTransform = playerCamera.transform;
+        Vector3 origin = cameraTransform.position;
+        Vector3 direction = cameraTransform.forward;
+
+        int hitCount = Physics.SphereCastNonAlloc(
+            origin,
+            interactionRadius,
+            direction,
+            _interactionHits,
+            interactionDistance,
+            interactionMask,
+            QueryTriggerInteraction.Ignore
+        );
+
+        IInteractable bestInteractable = null;
+        float nearestDistance = float.MaxValue;
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            RaycastHit hit = _interactionHits[i];
+            if (hit.collider == null)
+            {
+                continue;
+            }
+
+            IInteractable interactable = hit.collider.GetComponentInParent<IInteractable>();
+            if (interactable == null)
+            {
+                continue;
+            }
+
+            if (hit.distance < nearestDistance)
+            {
+                nearestDistance = hit.distance;
+                bestInteractable = interactable;
+            }
+        }
+
+        bestInteractable?.Interact();
     }
 
     private void HandleCameraMotion(float deltaTime)
