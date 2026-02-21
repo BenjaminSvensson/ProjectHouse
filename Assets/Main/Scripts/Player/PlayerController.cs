@@ -15,6 +15,8 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float acceleration = 18f;
     [SerializeField] private float airControl = 0.25f;
     [SerializeField] private float jumpHeight = 1.25f;
+    [SerializeField] private float coyoteTime = 0.12f;
+    [SerializeField] private float jumpBufferTime = 0.12f;
     [SerializeField] private float gravity = -22f;
     [SerializeField] private float groundedStickForce = -2f;
 
@@ -66,6 +68,8 @@ public class PlayerController : MonoBehaviour
 
     private Vector3 _horizontalVelocity;
     private float _verticalVelocity;
+    private float _coyoteTimer;
+    private float _jumpBufferTimer;
     private float _pitch;
     private float _yaw;
 
@@ -186,6 +190,15 @@ public class PlayerController : MonoBehaviour
         bool jumpPressed = _actions.Player.Jump.WasPressedThisFrame();
         bool runHeld = _actions.Player.Run.IsPressed();
 
+        if (jumpPressed)
+        {
+            _jumpBufferTimer = jumpBufferTime;
+        }
+        else
+        {
+            _jumpBufferTimer -= deltaTime;
+        }
+
         if (toggleCrouch)
         {
             if (_actions.Player.Crouch.WasPressedThisFrame())
@@ -216,6 +229,8 @@ public class PlayerController : MonoBehaviour
 
         if (_isGrounded)
         {
+            _coyoteTimer = coyoteTime;
+
             if (!_wasGrounded && _verticalVelocity < -8f)
             {
                 float impact = Mathf.InverseLerp(8f, 26f, -_verticalVelocity);
@@ -224,14 +239,18 @@ public class PlayerController : MonoBehaviour
             }
 
             _verticalVelocity = groundedStickForce;
-            if (jumpPressed && !_isCrouching)
-            {
-                _verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
-            }
         }
         else
         {
+            _coyoteTimer -= deltaTime;
             _verticalVelocity += gravity * deltaTime;
+        }
+
+        if (!_isCrouching && _jumpBufferTimer > 0f && _coyoteTimer > 0f)
+        {
+            _verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
+            _jumpBufferTimer = 0f;
+            _coyoteTimer = 0f;
         }
 
         Vector3 frameVelocity = _horizontalVelocity + Vector3.up * _verticalVelocity;
