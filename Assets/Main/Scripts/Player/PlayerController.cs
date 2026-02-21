@@ -59,6 +59,12 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float landingKickRotation = 4.8f;
     [SerializeField] private float landingKickDamping = 10f;
 
+    [Header("Camera Collision")]
+    [SerializeField] private bool preventCameraClipping = true;
+    [SerializeField] private LayerMask cameraCollisionMask = ~0;
+    [SerializeField] private float cameraCollisionRadius = 0.12f;
+    [SerializeField] private float cameraCollisionPadding = 0.02f;
+
     private CharacterController _controller;
     private InputSystem_Actions _actions;
 
@@ -90,6 +96,8 @@ public class PlayerController : MonoBehaviour
     private Vector3 _baseCameraLocalPosition;
     private float _landingPositionImpulse;
     private float _landingRotationImpulse;
+    private readonly RaycastHit[] _cameraCollisionHits = new RaycastHit[8];
+    private readonly Collider[] _cameraOverlapHits = new Collider[16];
 
     private void Awake()
     {
@@ -344,6 +352,7 @@ public class PlayerController : MonoBehaviour
         desiredLocalPosition.x += _lean * leanOffset;
         desiredLocalPosition += _bobPosition;
         desiredLocalPosition.y -= _landingPositionImpulse;
+        desiredLocalPosition = ResolveCameraCollision(desiredLocalPosition);
 
         float strafeTilt = -_moveInput.x * movementTilt;
         float lookRoll = -_smoothedLook.x * lookTilt;
@@ -354,6 +363,122 @@ public class PlayerController : MonoBehaviour
 
         cameraPivot.localPosition = Vector3.Lerp(cameraPivot.localPosition, desiredLocalPosition, 1f - Mathf.Exp(-bobSmoothing * deltaTime));
         cameraPivot.localRotation = Quaternion.Slerp(cameraPivot.localRotation, targetLocalRotation, 1f - Mathf.Exp(-(bobSmoothing + 4f) * deltaTime));
+    }
+
+    private Vector3 ResolveCameraCollision(Vector3 desiredLocalPosition)
+    {
+        if (!preventCameraClipping)
+        {
+            return desiredLocalPosition;
+        }
+
+        Transform cameraSpace = cameraPivot.parent != null ? cameraPivot.parent : transform;
+
+        Vector3 anchorLocalPosition = _baseCameraLocalPosition;
+        anchorLocalPosition.y = desiredLocalPosition.y;
+
+        Vector3 anchorWorldPosition = cameraSpace.TransformPoint(anchorLocalPosition);
+        Vector3 targetWorldPosition = cameraSpace.TransformPoint(desiredLocalPosition);
+        Vector3 castVector = targetWorldPosition - anchorWorldPosition;
+        float castDistance = castVector.magnitude;
+
+        if (castDistance <= 0.0001f)
+        {
+            return desiredLocalPosition;
+        }
+
+        Vector3 castDirection = castVector / castDistance;
+        int hitCount = Physics.SphereCastNonAlloc(
+            anchorWorldPosition,
+            cameraCollisionRadius,
+            castDirection,
+            _cameraCollisionHits,
+            castDistance + cameraCollisionPadding,
+            cameraCollisionMask,
+            QueryTriggerInteraction.Ignore
+        );
+
+        float nearestDistance = castDistance;
+        for (int i = 0; i < hitCount; i++)
+        {
+            RaycastHit hit = _cameraCollisionHits[i];
+            if (hit.collider == null)
+            {
+                continue;
+            }
+
+            if (hit.collider.transform == transform || hit.collider.transform.IsChildOf(transform))
+            {
+                continue;
+            }
+
+            float hitDistance = Mathf.Max(0f, hit.distance - cameraCollisionPadding);
+            if (hitDistance < nearestDistance)
+            {
+                nearestDistance = hitDistance;
+            }
+        }
+
+        float allowedDistance = nearestDistance;
+        bool targetBlocked = IsCameraPositionBlocked(targetWorldPosition);
+
+        if (targetBlocked)
+        {
+            float low = 0f;
+            float high = allowedDistance;
+            for (int i = 0; i < 8; i++)
+            {
+                float mid = (low + high) * 0.5f;
+                Vector3 midPosition = anchorWorldPosition + castDirection * mid;
+                if (IsCameraPositionBlocked(midPosition))
+                {
+                    high = mid;
+                }
+                else
+                {
+                    low = mid;
+                }
+            }
+
+            allowedDistance = low;
+        }
+
+        if (!targetBlocked && allowedDistance >= castDistance)
+        {
+            return desiredLocalPosition;
+        }
+
+        Vector3 clippedWorldPosition = anchorWorldPosition + castDirection * allowedDistance;
+        return cameraSpace.InverseTransformPoint(clippedWorldPosition);
+    }
+
+    private bool IsCameraPositionBlocked(Vector3 worldPosition)
+    {
+        int overlapCount = Physics.OverlapSphereNonAlloc(
+            worldPosition,
+            cameraCollisionRadius,
+            _cameraOverlapHits,
+            cameraCollisionMask,
+            QueryTriggerInteraction.Ignore
+        );
+
+        for (int i = 0; i < overlapCount; i++)
+        {
+            Collider colliderHit = _cameraOverlapHits[i];
+            if (colliderHit == null)
+            {
+                continue;
+            }
+
+            if (colliderHit.transform == transform || colliderHit.transform.IsChildOf(transform))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private void OnApplicationFocus(bool hasFocus)
