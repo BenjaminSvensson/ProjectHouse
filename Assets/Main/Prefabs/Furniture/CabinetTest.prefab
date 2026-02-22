@@ -816,7 +816,7 @@ GameObject:
   - component: {fileID: 2454534916392973751}
   - component: {fileID: 9047002867019385296}
   m_Layer: 0
-  m_Name: Cabinet
+  m_Name: CabinetTest
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0

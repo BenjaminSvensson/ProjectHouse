@@ -53,7 +53,7 @@ CharacterController:
   m_Enabled: 1
   serializedVersion: 3
   m_Height: 1.6
-  m_Radius: 0.4
+  m_Radius: 0.45
   m_SlopeLimit: 45
   m_StepOffset: 0.3
   m_SkinWidth: 0.08
@@ -118,6 +118,11 @@ MonoBehaviour:
     m_Bits: 4294967295
   cameraCollisionRadius: 0.12
   cameraCollisionPadding: 0.02
+  interactionDistance: 2.5
+  interactionRadius: 0.08
+  interactionMask:
+    serializedVersion: 2
+    m_Bits: 4294967295
 --- !u!1 &5887320061171419483
 GameObject:
   m_ObjectHideFlags: 0
