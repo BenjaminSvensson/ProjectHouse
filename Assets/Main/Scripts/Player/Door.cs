@@ -29,15 +29,29 @@ public class Door : MonoBehaviour, IInteractable
     [SerializeField] private AudioClip openSound;
     [SerializeField] private AudioClip closeSound;
     [SerializeField] private AudioClip lockedSound;
+    [SerializeField] private AudioClip kickedDownSound;
     [SerializeField, Range(0f, 1f)] private float soundVolume = 1f;
+
+    [Header("Kick Down")]
+    [SerializeField] private float kickDownAngle = 140f;
+    [SerializeField] private float kickDownRotateSpeed = 460f;
+    [SerializeField] private bool kickDirectionFromForce = true;
+    [SerializeField] private bool disableCollisionOnKickDown = true;
 
     private bool _isOpen;
     private bool _isLocked;
+    private bool _isKickedDown;
+    private bool _isKickingDown;
     private float _blend;
     private float _blendVelocity;
     private float _swayAngle;
     private float _swayVelocity;
     private float _lockedShakeDirection = 1f;
+    private Quaternion _kickDownTargetRotation;
+
+    public bool IsOpen => _isOpen;
+    public bool IsLocked => _isLocked;
+    public bool IsKickedDown => _isKickedDown;
 
     private void Awake()
     {
@@ -59,6 +73,26 @@ public class Door : MonoBehaviour, IInteractable
 
     private void Update()
     {
+        if (_isKickedDown)
+        {
+            if (_isKickingDown && hinge != null)
+            {
+                hinge.localRotation = Quaternion.RotateTowards(
+                    hinge.localRotation,
+                    _kickDownTargetRotation,
+                    kickDownRotateSpeed * Time.deltaTime
+                );
+
+                if (Quaternion.Angle(hinge.localRotation, _kickDownTargetRotation) <= 0.1f)
+                {
+                    hinge.localRotation = _kickDownTargetRotation;
+                    _isKickingDown = false;
+                }
+            }
+
+            return;
+        }
+
         float dt = Time.deltaTime;
         float targetBlend = _isOpen ? 1f : 0f;
         _blend = Mathf.SmoothDamp(_blend, targetBlend, ref _blendVelocity, rotateSmoothTime, Mathf.Infinity, dt);
@@ -73,6 +107,11 @@ public class Door : MonoBehaviour, IInteractable
 
     public void Interact()
     {
+        if (_isKickedDown)
+        {
+            return;
+        }
+
         if (_isLocked)
         {
             _lockedShakeDirection = -_lockedShakeDirection;
@@ -88,17 +127,97 @@ public class Door : MonoBehaviour, IInteractable
 
     public void SetLocked(bool locked)
     {
+        if (_isKickedDown)
+        {
+            return;
+        }
+
         _isLocked = locked;
     }
 
     public void Lock()
     {
+        if (_isKickedDown)
+        {
+            return;
+        }
+
         _isLocked = true;
     }
 
     public void Unlock()
     {
+        if (_isKickedDown)
+        {
+            return;
+        }
+
         _isLocked = false;
+    }
+
+    public void Rumble(float impulse)
+    {
+        if (_isKickedDown)
+        {
+            return;
+        }
+
+        float direction = Mathf.Sign(_lockedShakeDirection);
+        if (Mathf.Approximately(direction, 0f))
+        {
+            direction = 1f;
+        }
+
+        _lockedShakeDirection = -direction;
+        _swayVelocity += Mathf.Abs(impulse) * _lockedShakeDirection;
+    }
+
+    public bool KickDown(Vector3 force, Vector3 hitPoint)
+    {
+        if (_isKickedDown)
+        {
+            return false;
+        }
+
+        _isKickedDown = true;
+        _isLocked = false;
+        _isOpen = true;
+        _blend = 1f;
+        _blendVelocity = 0f;
+        _isKickingDown = true;
+
+        if (hinge != null)
+        {
+            Vector3 axis = hingeAxis.sqrMagnitude > 0.0001f ? hingeAxis.normalized : Vector3.up;
+            float sign = 1f;
+
+            if (kickDirectionFromForce && force.sqrMagnitude > 0.0001f)
+            {
+                Vector3 localForce = hinge.InverseTransformDirection(force.normalized);
+                float projection = Vector3.Dot(localForce, axis);
+                if (!Mathf.Approximately(projection, 0f))
+                {
+                    sign = Mathf.Sign(projection);
+                }
+            }
+
+            _kickDownTargetRotation = hinge.localRotation * Quaternion.AngleAxis(kickDownAngle * sign, axis);
+        }
+
+        if (disableCollisionOnKickDown)
+        {
+            Collider[] colliders = GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < colliders.Length; i++)
+            {
+                if (colliders[i] != null)
+                {
+                    colliders[i].enabled = false;
+                }
+            }
+        }
+
+        PlaySound(kickedDownSound);
+        return true;
     }
 
     private void ApplyDoorRotation()

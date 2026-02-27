@@ -24,9 +24,9 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2055887082897844821}
   serializedVersion: 2
-  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0.642, y: 1.14, z: 0.1181}
-  m_LocalScale: {x: 0.37995, y: 2.5989366, z: 1.2362567}
+  m_LocalScale: {x: 0.38329357, y: 2.5545056, z: 1.262725}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 3526693709036602374}
@@ -46,7 +46,7 @@ GameObject:
   - component: {fileID: 2700866444108826748}
   - component: {fileID: 5504640763388818516}
   - component: {fileID: 1915684850601507071}
-  m_Layer: 0
+  m_Layer: 8
   m_Name: Cube (5)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -160,11 +160,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Door
   hinge: {fileID: 7065582727866346469}
   audioSource: {fileID: 1915684850601507071}
-  closedLocalEuler: {x: 0, y: 0, z: 0}
-  openLocalEuler: {x: 0, y: 110, z: 0}
+  closedLocalEuler: {x: 0, y: 90, z: 0}
+  openLocalEuler: {x: 0, y: -20, z: 0}
   startsOpen: 0
   rotateSmoothTime: 0.26
-  startsLocked: 0
+  startsLocked: 1
   lockedShakeImpulse: 75
   hingeAxis: {x: 0, y: 1, z: 0}
   swayImpulse: 55
@@ -174,7 +174,11 @@ MonoBehaviour:
   openSound: {fileID: 8300000, guid: d070455d76e2eae4bae606c8b4c95f9b, type: 3}
   closeSound: {fileID: 8300000, guid: d4b5952c32e1b974f8ef15c9aaa482a1, type: 3}
   lockedSound: {fileID: 8300000, guid: e3d34b4a2443c894fb388a9808f65b45, type: 3}
+  kickedDownSound: {fileID: 0}
   soundVolume: 1
+  kickDownAngle: 140
+  kickDownRotateSpeed: 460
+  kickDirectionFromForce: 1
 --- !u!82 &1915684850601507071
 AudioSource:
   m_ObjectHideFlags: 0
