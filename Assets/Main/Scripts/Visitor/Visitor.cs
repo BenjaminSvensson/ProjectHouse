@@ -234,7 +234,8 @@ public class Visitor : MonoBehaviour
 
             if (searchLocations.Count > 0)
             {
-                AdvanceSearchLocation();
+                bool hasNearbySearchableDoor = HasSearchableDoorNearPosition(transform.position, doorViewDistance);
+                AdvanceSearchLocation(!hasNearbySearchableDoor);
                 return;
             }
 
@@ -767,12 +768,17 @@ public class Visitor : MonoBehaviour
 
     private void AdvanceSearchLocation()
     {
+        AdvanceSearchLocation(false);
+    }
+
+    private void AdvanceSearchLocation(bool moveImmediately)
+    {
         if (searchLocations.Count == 0)
         {
             return;
         }
 
-        _nextSearchLocationMoveTime = Time.time + searchLocationLookTime;
+        _nextSearchLocationMoveTime = moveImmediately ? Time.time : Time.time + searchLocationLookTime;
         if (randomizeSearchLocations)
         {
             int nextIndex = _searchLocationIndex;
@@ -795,6 +801,36 @@ public class Visitor : MonoBehaviour
         }
 
         _wanderTarget = searchLocations[_searchLocationIndex].position;
+    }
+
+    private bool HasSearchableDoorNearPosition(Vector3 position, float radius)
+    {
+        int hitCount = Physics.OverlapSphereNonAlloc(
+            position,
+            radius,
+            _doorOverlapHits,
+            doorMask,
+            QueryTriggerInteraction.Ignore
+        );
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            Collider hitCollider = _doorOverlapHits[i];
+            if (hitCollider == null)
+            {
+                continue;
+            }
+
+            Door door = hitCollider.GetComponentInParent<Door>();
+            if (door == null || door.IsKickedDown || door.IsOpen)
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private static Vector3 FlattenY(Vector3 v)
