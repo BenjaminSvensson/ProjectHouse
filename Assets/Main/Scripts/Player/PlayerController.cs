@@ -38,6 +38,8 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float crouchTransitionSpeed = 12f;
     [SerializeField] private float standingCameraHeight = 0.82f;
     [SerializeField] private float crouchingCameraHeight = 0.48f;
+    [SerializeField] private LayerMask standUpCollisionMask = ~0;
+    [SerializeField] private float standUpRadiusPadding = 0.01f;
 
     [Header("Lean")]
     [SerializeField] private float leanAngle = 10f;
@@ -109,6 +111,7 @@ public class PlayerController : MonoBehaviour
     private readonly RaycastHit[] _cameraCollisionHits = new RaycastHit[8];
     private readonly Collider[] _cameraOverlapHits = new Collider[16];
     private readonly RaycastHit[] _interactionHits = new RaycastHit[16];
+    private readonly Collider[] _standUpHits = new Collider[16];
 
     private void Awake()
     {
@@ -219,16 +222,26 @@ public class PlayerController : MonoBehaviour
             _jumpBufferTimer -= deltaTime;
         }
 
+        bool wantsCrouch = _isCrouching;
         if (toggleCrouch)
         {
             if (_actions.Player.Crouch.WasPressedThisFrame())
             {
-                _isCrouching = !_isCrouching;
+                wantsCrouch = !_isCrouching;
             }
         }
         else
         {
-            _isCrouching = _crouchHeld;
+            wantsCrouch = _crouchHeld;
+        }
+
+        if (!wantsCrouch && !CanStandUp())
+        {
+            _isCrouching = true;
+        }
+        else
+        {
+            _isCrouching = wantsCrouch;
         }
 
         float speed = walkSpeed;
@@ -515,6 +528,43 @@ public class PlayerController : MonoBehaviour
 
         Vector3 clippedWorldPosition = anchorWorldPosition + castDirection * allowedDistance;
         return cameraSpace.InverseTransformPoint(clippedWorldPosition);
+    }
+
+    private bool CanStandUp()
+    {
+        float radius = Mathf.Max(0.01f, _controller.radius - standUpRadiusPadding);
+        float capsuleHeight = Mathf.Max(standingHeight, radius * 2f + 0.01f);
+
+        Vector3 feetWorldPosition = transform.TransformPoint(new Vector3(_controller.center.x, 0f, _controller.center.z));
+        Vector3 capsuleBottom = feetWorldPosition + Vector3.up * radius;
+        Vector3 capsuleTop = feetWorldPosition + Vector3.up * (capsuleHeight - radius);
+
+        int hitCount = Physics.OverlapCapsuleNonAlloc(
+            capsuleBottom,
+            capsuleTop,
+            radius,
+            _standUpHits,
+            standUpCollisionMask,
+            QueryTriggerInteraction.Ignore
+        );
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            Collider hit = _standUpHits[i];
+            if (hit == null)
+            {
+                continue;
+            }
+
+            if (hit.transform == transform || hit.transform.IsChildOf(transform))
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     private bool IsCameraPositionBlocked(Vector3 worldPosition)

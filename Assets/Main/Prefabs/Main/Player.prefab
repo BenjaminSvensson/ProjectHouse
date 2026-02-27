@@ -96,9 +96,9 @@ MonoBehaviour:
   leanAngle: 10
   leanOffset: 1
   leanSmooth: 20
-  defaultFov: 80
-  minZoomFov: 38
-  maxZoomFov: 95
+  defaultFov: 60
+  minZoomFov: 20
+  maxZoomFov: 60
   zoomStep: 4.5
   zoomWheelScale: 1
   zoomSmooth: 9
@@ -112,12 +112,12 @@ MonoBehaviour:
   landingKickPosition: 0.065
   landingKickRotation: 4.8
   landingKickDamping: 10
-  preventCameraClipping: 1
+  preventCameraClipping: 0
   cameraCollisionMask:
     serializedVersion: 2
-    m_Bits: 4294967295
-  cameraCollisionRadius: 0.12
-  cameraCollisionPadding: 0.02
+    m_Bits: 0
+  cameraCollisionRadius: 0.5
+  cameraCollisionPadding: 1
   interactionDistance: 2.5
   interactionRadius: 0.08
   interactionMask:
