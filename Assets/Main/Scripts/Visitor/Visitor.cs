@@ -1,8 +1,10 @@
-using System.Collections.Generic;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.AI;
 using UnityEngine.SceneManagement;
 
+[RequireComponent(typeof(NavMeshAgent))]
 public class Visitor : MonoBehaviour
 {
     private enum GoalType
@@ -18,7 +20,7 @@ public class Visitor : MonoBehaviour
     [SerializeField] private Transform eyes;
     [SerializeField] private Transform player;
     [SerializeField] private string playerTag = "Player";
-    [SerializeField] private CharacterController controller;
+    [SerializeField] private NavMeshAgent agent;
     [SerializeField] private AudioSource audioSource;
     [SerializeField] private Transform visualRoot;
 
@@ -38,7 +40,7 @@ public class Visitor : MonoBehaviour
     [SerializeField] private float searchSpeed = 2.6f;
     [SerializeField] private float chaseSpeed = 5.8f;
     [SerializeField] private float turnSpeed = 180f;
-    [SerializeField] private float gravity = -22f;
+    [SerializeField] private float repathInterval = 0.2f;
     [SerializeField] private float searchRadius = 14f;
     [SerializeField] private float searchPointReachedDistance = 1.2f;
     [SerializeField] private float lookAroundTurnSpeed = 95f;
@@ -55,21 +57,6 @@ public class Visitor : MonoBehaviour
     [SerializeField] private bool followVisualPosition = true;
     [SerializeField] private bool followVisualYaw = true;
     [SerializeField] private float visualFollowLerp = 25f;
-
-    [Header("Wall Avoidance")]
-    [SerializeField] private float avoidProbeDistance = 1.2f;
-    [SerializeField] private float avoidProbeRadius = 0.28f;
-    [SerializeField] private float sideProbeAngle = 60f;
-    [SerializeField] private LayerMask obstacleMask = ~0;
-    [SerializeField] private int directionTryCount = 9;
-    [SerializeField] private float directionTryAngleStep = 25f;
-
-    [Header("Stuck Recovery")]
-    [SerializeField] private float stuckCheckInterval = 0.25f;
-    [SerializeField] private float stuckMinMoveDistance = 0.06f;
-    [SerializeField] private float stuckTimeBeforeRetry = 0.9f;
-    [SerializeField] private float forcedDirectionMinTime = 0.35f;
-    [SerializeField] private float forcedDirectionMaxTime = 0.85f;
 
     [Header("Doors")]
     [SerializeField] private float doorViewDistance = 14f;
@@ -101,15 +88,15 @@ public class Visitor : MonoBehaviour
     [SerializeField] private bool showDebugGizmos = true;
     [SerializeField] private bool showPerceptionGizmos = true;
     [SerializeField] private bool showGoalGizmos = true;
-    [SerializeField] private bool showAvoidanceGizmos = true;
     [SerializeField] private bool showDoorGizmos = true;
+    [SerializeField] private bool showPathGizmos = true;
 
     private GoalType _goal = GoalType.None;
     private Vector3 _spawnPosition;
     private Vector3 _wanderTarget;
     private Door _focusedDoor;
-    private float _verticalVelocity;
     private float _nextDoorActionTime;
+    private float _nextRepathTime;
     private int _searchLocationIndex;
     private float _nextSearchLocationMoveTime;
     private bool _hasPlayerMemory;
@@ -121,38 +108,21 @@ public class Visitor : MonoBehaviour
     private readonly Dictionary<Door, int> _kickCounts = new Dictionary<Door, int>();
     private readonly Collider[] _doorOverlapHits = new Collider[24];
     private readonly RaycastHit[] _doorForwardHits = new RaycastHit[16];
+
     private Vector3 _visualPositionOffset;
     private Quaternion _visualYawOffset = Quaternion.identity;
-    private Vector3 _debugGoalTarget;
-    private Vector3 _debugDesiredDirection;
-    private Vector3 _debugSteeredDirection;
-    private Vector3 _debugProbeOrigin;
-    private Vector3 _debugForwardProbeDirection;
-    private Vector3 _debugLeftProbeDirection;
-    private Vector3 _debugRightProbeDirection;
-    private bool _debugBlockedForward;
-    private bool _debugBlockedLeft;
-    private bool _debugBlockedRight;
-    private bool _debugCanSeePlayer;
-    private Door _debugDoorAhead;
-    private int _debugDirectionAttempts;
-    private bool _debugUsingForcedDirection;
-    private Vector3 _debugForcedDirection;
-    private bool _isTryingToMove;
-    private Vector3 _lastStuckCheckPosition;
-    private float _nextStuckCheckTime;
-    private float _stuckAccumulatedTime;
-    private bool _hasForcedDirection;
-    private Vector3 _forcedDirection;
-    private float _forcedDirectionUntil;
     private bool _isCatchingPlayer;
     private Coroutine _reloadCoroutine;
 
+    private Vector3 _debugGoalTarget;
+    private bool _debugCanSeePlayer;
+    private Door _debugDoorAhead;
+
     private void Awake()
     {
-        if (controller == null)
+        if (agent == null)
         {
-            controller = GetComponent<CharacterController>();
+            agent = GetComponent<NavMeshAgent>();
         }
 
         if (audioSource == null)
@@ -180,9 +150,13 @@ public class Visitor : MonoBehaviour
             visualRoot = transform.GetChild(0);
         }
 
+        if (agent != null)
+        {
+            agent.updateRotation = false;
+            agent.speed = searchSpeed;
+        }
+
         _spawnPosition = transform.position;
-        _lastStuckCheckPosition = FlattenY(transform.position);
-        _nextStuckCheckTime = Time.time + stuckCheckInterval;
         CacheVisualFollowOffsets();
         ResolvePlayerReference();
         InitializeSearchRoute();
@@ -201,8 +175,8 @@ public class Visitor : MonoBehaviour
         EvaluateGoal();
         HandleChaseAudio(previousGoal, _goal);
         ExecuteGoal(Time.deltaTime);
-        UpdateStuckRecovery();
         HandleDoorAction();
+        UpdateFacingFromAgent(Time.deltaTime);
     }
 
     private void LateUpdate()
@@ -233,7 +207,6 @@ public class Visitor : MonoBehaviour
         }
 
         _hasPlayerMemory = false;
-
         Door visibleDoor = FindBestSearchDoor();
         if (visibleDoor != null)
         {
@@ -252,7 +225,6 @@ public class Visitor : MonoBehaviour
 
     private void ExecuteGoal(float deltaTime)
     {
-        _isTryingToMove = false;
         _debugGoalTarget = transform.position;
 
         if (_goal == GoalType.ChasePlayer && player != null)
@@ -264,8 +236,9 @@ public class Visitor : MonoBehaviour
                 return;
             }
 
+            SetAgentSpeed(chaseSpeed);
             _debugGoalTarget = player.position;
-            MoveTowards(player.position, chaseSpeed, deltaTime);
+            TrySetDestination(player.position);
             return;
         }
 
@@ -279,16 +252,18 @@ public class Visitor : MonoBehaviour
             else
             {
                 UpdateInvestigateTarget();
+                SetAgentSpeed(searchSpeed);
                 _debugGoalTarget = _investigateTarget;
-                MoveTowards(_investigateTarget, searchSpeed, deltaTime);
+                TrySetDestination(_investigateTarget);
                 return;
             }
         }
 
         if (_goal == GoalType.Door && _focusedDoor != null && !_focusedDoor.IsKickedDown)
         {
+            SetAgentSpeed(searchSpeed);
             _debugGoalTarget = _focusedDoor.transform.position;
-            MoveTowards(_focusedDoor.transform.position, searchSpeed, deltaTime);
+            TrySetDestination(_focusedDoor.transform.position);
             return;
         }
 
@@ -324,17 +299,13 @@ public class Visitor : MonoBehaviour
             return;
         }
 
+        SetAgentSpeed(searchSpeed);
         _debugGoalTarget = _wanderTarget;
-        MoveTowards(_wanderTarget, searchSpeed, deltaTime);
+        TrySetDestination(_wanderTarget);
     }
 
     private void HandleDoorAction()
     {
-        if (_goal == GoalType.ChasePlayer || _goal == GoalType.InvestigatePlayer)
-        {
-            return;
-        }
-
         if (Time.time < _nextDoorActionTime)
         {
             return;
@@ -375,247 +346,57 @@ public class Visitor : MonoBehaviour
         }
     }
 
-    private void MoveTowards(Vector3 targetPosition, float speed, float deltaTime)
+    private void TrySetDestination(Vector3 target)
     {
-        Vector3 flatPosition = FlattenY(transform.position);
-        Vector3 flatTarget = FlattenY(targetPosition);
-        Vector3 toTarget = flatTarget - flatPosition;
-
-        if (toTarget.sqrMagnitude <= 0.0001f)
+        if (agent == null || !agent.enabled || !agent.isOnNavMesh)
         {
-            ApplyMotion(Vector3.zero, deltaTime);
             return;
         }
 
-        _isTryingToMove = true;
-        Vector3 desiredDirection = toTarget.normalized;
-        _debugDesiredDirection = desiredDirection;
-        Vector3 steeredDirection = ApplyWallAvoidance(desiredDirection);
-        _debugSteeredDirection = steeredDirection;
-        RotateTowards(steeredDirection, deltaTime);
-
-        Vector3 horizontalVelocity = steeredDirection * speed;
-        ApplyMotion(horizontalVelocity, deltaTime);
-    }
-
-    private Vector3 ApplyWallAvoidance(Vector3 desiredDirection)
-    {
-        Vector3 origin = eyes != null ? eyes.position : transform.position + Vector3.up * 1f;
-        float castDistance = Mathf.Max(0.05f, avoidProbeDistance);
-        Vector3 baseDirection = desiredDirection;
-
-        if (_hasForcedDirection && Time.time < _forcedDirectionUntil)
+        if (Time.time < _nextRepathTime)
         {
-            baseDirection = Vector3.Slerp(desiredDirection, _forcedDirection, 0.88f).normalized;
-            _debugUsingForcedDirection = true;
-            _debugForcedDirection = _forcedDirection;
+            return;
+        }
+
+        Vector3 targetFlat = FlattenY(target) + Vector3.up * transform.position.y;
+        if (NavMesh.SamplePosition(targetFlat, out NavMeshHit sample, 3f, NavMesh.AllAreas))
+        {
+            agent.SetDestination(sample.position);
         }
         else
         {
-            _hasForcedDirection = false;
-            _debugUsingForcedDirection = false;
-            _debugForcedDirection = Vector3.zero;
+            agent.SetDestination(targetFlat);
         }
 
-        _debugProbeOrigin = origin;
-        _debugForwardProbeDirection = baseDirection;
-        _debugLeftProbeDirection = Quaternion.Euler(0f, -sideProbeAngle, 0f) * baseDirection;
-        _debugRightProbeDirection = Quaternion.Euler(0f, sideProbeAngle, 0f) * baseDirection;
-        _debugBlockedForward = false;
-        _debugBlockedLeft = false;
-        _debugBlockedRight = false;
-        _debugDirectionAttempts = 0;
-
-        _debugBlockedForward = IsDirectionBlocked(origin, _debugForwardProbeDirection, castDistance, out _, out _);
-        _debugBlockedLeft = IsDirectionBlocked(origin, _debugLeftProbeDirection, castDistance, out _, out _);
-        _debugBlockedRight = IsDirectionBlocked(origin, _debugRightProbeDirection, castDistance, out _, out _);
-
-        int attempts = Mathf.Max(1, directionTryCount);
-        for (int i = 0; i < attempts; i++)
-        {
-            float offsetAngle = DirectionOffsetByIndex(i);
-            Vector3 candidateDirection = Quaternion.Euler(0f, offsetAngle, 0f) * baseDirection;
-            _debugDirectionAttempts = i + 1;
-
-            if (!IsDirectionBlocked(origin, candidateDirection, castDistance, out _, out _))
-            {
-                return candidateDirection.normalized;
-            }
-        }
-
-        // No clear candidate: keep pushing forward so we still move and let stuck recovery pick new headings.
-        return baseDirection;
+        _nextRepathTime = Time.time + repathInterval;
     }
 
-    private bool IsDirectionBlocked(Vector3 origin, Vector3 direction, float castDistance, out float hitDistance, out Vector3 hitNormal)
+    private void SetAgentSpeed(float speed)
     {
-        hitDistance = castDistance;
-        hitNormal = Vector3.zero;
-
-        if (direction.sqrMagnitude <= 0.0001f)
-        {
-            return false;
-        }
-
-        bool hitSomething = Physics.SphereCast(
-            origin,
-            avoidProbeRadius,
-            direction.normalized,
-            out RaycastHit hit,
-            castDistance,
-            obstacleMask,
-            QueryTriggerInteraction.Ignore
-        );
-
-        if (!hitSomething)
-        {
-            return false;
-        }
-
-        if (IsIgnorableObstacle(hit.collider))
-        {
-            return false;
-        }
-
-        hitDistance = hit.distance;
-        hitNormal = hit.normal;
-        return true;
-    }
-
-    private float DirectionOffsetByIndex(int index)
-    {
-        if (index <= 0)
-        {
-            return 0f;
-        }
-
-        int ring = (index + 1) / 2;
-        float sign = (index % 2 == 1) ? 1f : -1f;
-        return sign * ring * directionTryAngleStep;
-    }
-
-    private bool IsIgnorableObstacle(Collider colliderHit)
-    {
-        if (colliderHit == null)
-        {
-            return true;
-        }
-
-        if (colliderHit.transform == transform || colliderHit.transform.IsChildOf(transform))
-        {
-            return true;
-        }
-
-        Door door = colliderHit.GetComponentInParent<Door>();
-        if (door == null)
-        {
-            return false;
-        }
-
-        if (door.IsKickedDown || door.IsOpen)
-        {
-            return true;
-        }
-
-        return _focusedDoor != null && door == _focusedDoor;
-    }
-
-    private void RotateTowards(Vector3 direction, float deltaTime)
-    {
-        if (direction.sqrMagnitude <= 0.0001f)
+        if (agent == null)
         {
             return;
         }
 
-        Quaternion targetRotation = Quaternion.LookRotation(direction, Vector3.up);
+        agent.speed = speed;
+    }
+
+    private void UpdateFacingFromAgent(float deltaTime)
+    {
+        if (agent == null || !agent.enabled)
+        {
+            return;
+        }
+
+        Vector3 desiredDirection = agent.desiredVelocity;
+        desiredDirection.y = 0f;
+        if (desiredDirection.sqrMagnitude <= 0.001f)
+        {
+            return;
+        }
+
+        Quaternion targetRotation = Quaternion.LookRotation(desiredDirection.normalized, Vector3.up);
         transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRotation, turnSpeed * deltaTime);
-    }
-
-    private void ApplyMotion(Vector3 horizontalVelocity, float deltaTime)
-    {
-        if (controller != null)
-        {
-            if (controller.isGrounded && _verticalVelocity < 0f)
-            {
-                _verticalVelocity = -2f;
-            }
-
-            _verticalVelocity += gravity * deltaTime;
-            Vector3 velocity = horizontalVelocity + Vector3.up * _verticalVelocity;
-            controller.Move(velocity * deltaTime);
-            return;
-        }
-
-        transform.position += horizontalVelocity * deltaTime;
-    }
-
-    private void UpdateStuckRecovery()
-    {
-        if (!_isTryingToMove)
-        {
-            _stuckAccumulatedTime = Mathf.Max(0f, _stuckAccumulatedTime - Time.deltaTime);
-            _lastStuckCheckPosition = FlattenY(transform.position);
-            _nextStuckCheckTime = Time.time + stuckCheckInterval;
-            return;
-        }
-
-        if (Time.time < _nextStuckCheckTime)
-        {
-            return;
-        }
-
-        Vector3 currentFlatPosition = FlattenY(transform.position);
-        float movedDistance = Vector3.Distance(currentFlatPosition, _lastStuckCheckPosition);
-        if (movedDistance < stuckMinMoveDistance)
-        {
-            _stuckAccumulatedTime += stuckCheckInterval;
-        }
-        else
-        {
-            _stuckAccumulatedTime = Mathf.Max(0f, _stuckAccumulatedTime - stuckCheckInterval * 0.75f);
-        }
-
-        if (_stuckAccumulatedTime >= stuckTimeBeforeRetry)
-        {
-            ForceTryNewDirection();
-            _stuckAccumulatedTime = 0f;
-        }
-
-        _lastStuckCheckPosition = currentFlatPosition;
-        _nextStuckCheckTime = Time.time + stuckCheckInterval;
-    }
-
-    private void ForceTryNewDirection()
-    {
-        Vector3 origin = eyes != null ? eyes.position : transform.position + Vector3.up * 1f;
-        Vector3 baseDirection = _debugDesiredDirection.sqrMagnitude > 0.0001f
-            ? _debugDesiredDirection.normalized
-            : transform.forward;
-
-        Vector3 chosenDirection = baseDirection;
-        int attempts = Mathf.Max(4, directionTryCount);
-        for (int i = 0; i < attempts; i++)
-        {
-            float randomAngle = Random.Range(-170f, 170f);
-            Vector3 candidateDirection = Quaternion.Euler(0f, randomAngle, 0f) * baseDirection;
-
-            if (!IsDirectionBlocked(origin, candidateDirection, avoidProbeDistance * 0.95f, out _, out _))
-            {
-                chosenDirection = candidateDirection.normalized;
-                break;
-            }
-
-            chosenDirection = candidateDirection.normalized;
-        }
-
-        _hasForcedDirection = true;
-        _forcedDirection = chosenDirection;
-        _forcedDirectionUntil = Time.time + Random.Range(forcedDirectionMinTime, forcedDirectionMaxTime);
-
-        if (_goal == GoalType.Wander && Random.value < 0.35f)
-        {
-            PickNewWanderTarget();
-        }
     }
 
     private Door FindBestSearchDoor()
@@ -657,7 +438,6 @@ public class Visitor : MonoBehaviour
             float score = distance;
             if (door.IsLocked)
             {
-                // Prefer locked doors slightly so visitor aggressively clears blocked rooms.
                 score -= 1.5f;
             }
 
@@ -678,6 +458,16 @@ public class Visitor : MonoBehaviour
 
         Vector3 origin = eyes != null ? eyes.position : transform.position + Vector3.up * 1f;
         Vector3 direction = transform.forward;
+        if (agent != null && agent.desiredVelocity.sqrMagnitude > 0.05f)
+        {
+            Vector3 v = agent.desiredVelocity;
+            v.y = 0f;
+            if (v.sqrMagnitude > 0.0001f)
+            {
+                direction = v.normalized;
+            }
+        }
+
         int hitCount = Physics.SphereCastNonAlloc(
             origin,
             doorDetectRadius,
@@ -757,11 +547,6 @@ public class Visitor : MonoBehaviour
         return CanSeePoint(playerPoint, player);
     }
 
-    private bool CanSeePoint(Vector3 point)
-    {
-        return CanSeePoint(point, null);
-    }
-
     private bool CanSeePoint(Vector3 point, Transform expectedTransform)
     {
         if (eyes == null)
@@ -789,7 +574,6 @@ public class Visitor : MonoBehaviour
             {
                 return hit.transform == expectedTransform || hit.transform.IsChildOf(expectedTransform);
             }
-
             return false;
         }
 
@@ -849,11 +633,6 @@ public class Visitor : MonoBehaviour
         _nextSearchLocationMoveTime = 0f;
     }
 
-    private void AdvanceSearchLocation()
-    {
-        AdvanceSearchLocation(false);
-    }
-
     private void AdvanceSearchLocation(bool moveImmediately)
     {
         if (searchLocations.Count == 0)
@@ -872,6 +651,7 @@ public class Visitor : MonoBehaviour
                     nextIndex = Random.Range(0, searchLocations.Count);
                 }
             }
+
             _searchLocationIndex = nextIndex;
             _wanderTarget = searchLocations[_searchLocationIndex].position;
             return;
@@ -916,20 +696,20 @@ public class Visitor : MonoBehaviour
         return false;
     }
 
-    private static Vector3 FlattenY(Vector3 v)
-    {
-        return new Vector3(v.x, 0f, v.z);
-    }
-
     private void UpdateInvestigateTarget()
     {
-        float flatDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(_investigateTarget));
-        if (flatDistance <= investigatePointReachedDistance || Time.time >= _nextInvestigateRetargetTime)
+        float distance = Vector3.Distance(FlattenY(transform.position), FlattenY(_investigateTarget));
+        if (distance <= investigatePointReachedDistance || Time.time >= _nextInvestigateRetargetTime)
         {
             Vector2 offset = Random.insideUnitCircle * investigateRadius;
             _investigateTarget = _lastSeenPlayerPosition + new Vector3(offset.x, 0f, offset.y);
             _nextInvestigateRetargetTime = Time.time + investigateRetargetInterval;
         }
+    }
+
+    private static Vector3 FlattenY(Vector3 v)
+    {
+        return new Vector3(v.x, 0f, v.z);
     }
 
     private void PlayKickSound()
@@ -957,12 +737,14 @@ public class Visitor : MonoBehaviour
 
         bool enteredChase = previousGoal != GoalType.ChasePlayer && currentGoal == GoalType.ChasePlayer;
         bool exitedChase = previousGoal == GoalType.ChasePlayer && currentGoal != GoalType.ChasePlayer;
+        bool enteredInvestigate = previousGoal != GoalType.InvestigatePlayer && currentGoal == GoalType.InvestigatePlayer;
+        bool exitedInvestigate = previousGoal == GoalType.InvestigatePlayer && currentGoal != GoalType.InvestigatePlayer;
 
-        if (enteredChase)
+        if (enteredChase || enteredInvestigate)
         {
             StartChaseLoop();
         }
-        else if (exitedChase)
+        else if (exitedChase || exitedInvestigate)
         {
             StopChaseLoop();
         }
@@ -1097,11 +879,16 @@ public class Visitor : MonoBehaviour
 
         if (showGoalGizmos)
         {
-            Gizmos.color = Color.yellow;
-            Gizmos.DrawWireSphere(_wanderTarget, 0.35f);
             Gizmos.color = Color.magenta;
             Gizmos.DrawLine(transform.position + Vector3.up * 0.15f, _debugGoalTarget + Vector3.up * 0.15f);
             Gizmos.DrawWireSphere(_debugGoalTarget, 0.2f);
+
+            if (_hasPlayerMemory)
+            {
+                Gizmos.color = new Color(1f, 0.65f, 0f, 0.9f);
+                Gizmos.DrawWireSphere(_lastSeenPlayerPosition + Vector3.up * 0.15f, 0.35f);
+                Gizmos.DrawWireSphere(_investigateTarget + Vector3.up * 0.15f, 0.28f);
+            }
 
             if (searchLocations.Count > 0)
             {
@@ -1115,18 +902,6 @@ public class Visitor : MonoBehaviour
 
                     Gizmos.color = i == _searchLocationIndex ? Color.green : new Color(0.2f, 1f, 0.3f, 0.5f);
                     Gizmos.DrawWireCube(point.position + Vector3.up * 0.2f, new Vector3(0.35f, 0.35f, 0.35f));
-
-                    if (i + 1 < searchLocations.Count && searchLocations[i + 1] != null)
-                    {
-                        Gizmos.color = new Color(0.2f, 1f, 0.3f, 0.35f);
-                        Gizmos.DrawLine(point.position, searchLocations[i + 1].position);
-                    }
-                }
-
-                if (loopSearchLocations && searchLocations.Count > 1 && searchLocations[0] != null && searchLocations[searchLocations.Count - 1] != null)
-                {
-                    Gizmos.color = new Color(0.2f, 1f, 0.3f, 0.2f);
-                    Gizmos.DrawLine(searchLocations[searchLocations.Count - 1].position, searchLocations[0].position);
                 }
             }
         }
@@ -1150,39 +925,14 @@ public class Visitor : MonoBehaviour
             }
         }
 
-        if (showAvoidanceGizmos)
+        if (showPathGizmos && agent != null && agent.hasPath)
         {
-            DrawProbe(_debugProbeOrigin, _debugForwardProbeDirection, _debugBlockedForward ? Color.red : Color.green);
-            DrawProbe(_debugProbeOrigin, _debugLeftProbeDirection, _debugBlockedLeft ? Color.red : Color.green);
-            DrawProbe(_debugProbeOrigin, _debugRightProbeDirection, _debugBlockedRight ? Color.red : Color.green);
-
-            Gizmos.color = Color.cyan;
-            Gizmos.DrawLine(transform.position + Vector3.up * 0.45f, transform.position + Vector3.up * 0.45f + _debugDesiredDirection * 1.6f);
-            Gizmos.color = Color.white;
-            Gizmos.DrawLine(transform.position + Vector3.up * 0.6f, transform.position + Vector3.up * 0.6f + _debugSteeredDirection * 1.6f);
-
-            if (_debugUsingForcedDirection)
+            Gizmos.color = new Color(1f, 1f, 1f, 0.7f);
+            Vector3[] corners = agent.path.corners;
+            for (int i = 0; i < corners.Length - 1; i++)
             {
-                Gizmos.color = new Color(1f, 0.5f, 0f, 1f);
-                Gizmos.DrawLine(
-                    transform.position + Vector3.up * 0.8f,
-                    transform.position + Vector3.up * 0.8f + _debugForcedDirection * 1.7f
-                );
+                Gizmos.DrawLine(corners[i], corners[i + 1]);
             }
         }
-    }
-
-    private void DrawProbe(Vector3 origin, Vector3 direction, Color color)
-    {
-        if (direction.sqrMagnitude <= 0.0001f)
-        {
-            return;
-        }
-
-        Vector3 dir = direction.normalized;
-        Vector3 end = origin + dir * avoidProbeDistance;
-        Gizmos.color = color;
-        Gizmos.DrawLine(origin, end);
-        Gizmos.DrawWireSphere(end, avoidProbeRadius);
     }
 }

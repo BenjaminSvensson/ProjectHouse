@@ -4117,6 +4117,7 @@ GameObject:
   - component: {fileID: 906417350}
   - component: {fileID: 906417351}
   - component: {fileID: 906417352}
+  - component: {fileID: 906417353}
   m_Layer: 0
   m_Name: Visitor
   m_TagString: Untagged
@@ -4157,7 +4158,7 @@ MonoBehaviour:
   eyes: {fileID: 1567861070}
   player: {fileID: 224611133}
   playerTag: Player
-  controller: {fileID: 906417351}
+  agent: {fileID: 906417353}
   audioSource: {fileID: 906417352}
   visualRoot: {fileID: 1047054388}
   viewDistance: 26
@@ -4166,10 +4167,14 @@ MonoBehaviour:
     serializedVersion: 2
     m_Bits: 257
   playerEyeOffset: 1
+  playerMemoryDuration: 7
+  investigateRadius: 4.5
+  investigatePointReachedDistance: 1.35
+  investigateRetargetInterval: 0.8
   searchSpeed: 2.6
   chaseSpeed: 5.8
   turnSpeed: 180
-  gravity: -22
+  repathInterval: 0.2
   searchRadius: 14
   searchPointReachedDistance: 1.1
   lookAroundTurnSpeed: 95
@@ -4185,19 +4190,6 @@ MonoBehaviour:
   followVisualPosition: 1
   followVisualYaw: 1
   visualFollowLerp: 25
-  avoidProbeDistance: 1.2
-  avoidProbeRadius: 0.28
-  sideProbeAngle: 60
-  obstacleMask:
-    serializedVersion: 2
-    m_Bits: 1
-  directionTryCount: 9
-  directionTryAngleStep: 25
-  stuckCheckInterval: 0.25
-  stuckMinMoveDistance: 0.06
-  stuckTimeBeforeRetry: 0.9
-  forcedDirectionMinTime: 0.35
-  forcedDirectionMaxTime: 0.85
   doorViewDistance: 14
   doorSearchPriorityRadius: 22
   doorActionDistance: 1.75
@@ -4226,8 +4218,8 @@ MonoBehaviour:
   showDebugGizmos: 1
   showPerceptionGizmos: 1
   showGoalGizmos: 1
-  showAvoidanceGizmos: 1
   showDoorGizmos: 1
+  showPathGizmos: 1
 --- !u!143 &906417351
 CharacterController:
   m_ObjectHideFlags: 0
@@ -4350,6 +4342,28 @@ AudioSource:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
+--- !u!195 &906417353
+NavMeshAgent:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 906417348}
+  m_Enabled: 1
+  m_AgentTypeID: 0
+  m_Radius: 0.5
+  m_Speed: 3.5
+  m_Acceleration: 8
+  avoidancePriority: 50
+  m_AngularSpeed: 120
+  m_StoppingDistance: 0
+  m_AutoTraverseOffMeshLink: 1
+  m_AutoBraking: 1
+  m_AutoRepath: 1
+  m_Height: 2
+  m_BaseOffset: 0
+  m_WalkableMask: 4294967295
+  m_ObstacleAvoidanceType: 4
 --- !u!1 &907041822
 GameObject:
   m_ObjectHideFlags: 0
