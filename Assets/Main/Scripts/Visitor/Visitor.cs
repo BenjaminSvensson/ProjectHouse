@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+using System.Collections;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 public class Visitor : MonoBehaviour
 {
@@ -8,6 +10,7 @@ public class Visitor : MonoBehaviour
         None,
         Wander,
         Door,
+        InvestigatePlayer,
         ChasePlayer
     }
 
@@ -24,6 +27,12 @@ public class Visitor : MonoBehaviour
     [SerializeField, Range(5f, 179f)] private float viewAngle = 95f;
     [SerializeField] private LayerMask visionBlockerMask = ~0;
     [SerializeField] private float playerEyeOffset = 1f;
+
+    [Header("Player Memory")]
+    [SerializeField] private float playerMemoryDuration = 7f;
+    [SerializeField] private float investigateRadius = 4.5f;
+    [SerializeField] private float investigatePointReachedDistance = 1.35f;
+    [SerializeField] private float investigateRetargetInterval = 0.8f;
 
     [Header("Movement")]
     [SerializeField] private float searchSpeed = 2.6f;
@@ -79,6 +88,14 @@ public class Visitor : MonoBehaviour
     [Header("Audio")]
     [SerializeField] private AudioClip[] kickSounds;
     [SerializeField, Range(0f, 1f)] private float kickSoundVolume = 1f;
+    [SerializeField] private AudioSource chaseLoopAudioSource;
+    [SerializeField] private AudioClip chaseLoopClip;
+    [SerializeField, Range(0f, 1f)] private float chaseLoopVolume = 0.8f;
+    [SerializeField] private AudioSource catchAudioSource;
+    [SerializeField] private AudioClip catchPlayerClip;
+    [SerializeField, Range(0f, 1f)] private float catchPlayerVolume = 1f;
+    [SerializeField] private float catchDistance = 1.2f;
+    [SerializeField] private float sceneReloadDelay = 0.1f;
 
     [Header("Debug Gizmos")]
     [SerializeField] private bool showDebugGizmos = true;
@@ -95,6 +112,11 @@ public class Visitor : MonoBehaviour
     private float _nextDoorActionTime;
     private int _searchLocationIndex;
     private float _nextSearchLocationMoveTime;
+    private bool _hasPlayerMemory;
+    private float _playerMemoryUntil;
+    private Vector3 _lastSeenPlayerPosition;
+    private Vector3 _investigateTarget;
+    private float _nextInvestigateRetargetTime;
 
     private readonly Dictionary<Door, int> _kickCounts = new Dictionary<Door, int>();
     private readonly Collider[] _doorOverlapHits = new Collider[24];
@@ -123,6 +145,8 @@ public class Visitor : MonoBehaviour
     private bool _hasForcedDirection;
     private Vector3 _forcedDirection;
     private float _forcedDirectionUntil;
+    private bool _isCatchingPlayer;
+    private Coroutine _reloadCoroutine;
 
     private void Awake()
     {
@@ -134,6 +158,16 @@ public class Visitor : MonoBehaviour
         if (audioSource == null)
         {
             audioSource = GetComponent<AudioSource>();
+        }
+
+        if (chaseLoopAudioSource == null)
+        {
+            chaseLoopAudioSource = audioSource;
+        }
+
+        if (catchAudioSource == null)
+        {
+            catchAudioSource = audioSource;
         }
 
         if (eyes == null)
@@ -157,8 +191,15 @@ public class Visitor : MonoBehaviour
 
     private void Update()
     {
+        if (_isCatchingPlayer)
+        {
+            return;
+        }
+
         ResolvePlayerReference();
+        GoalType previousGoal = _goal;
         EvaluateGoal();
+        HandleChaseAudio(previousGoal, _goal);
         ExecuteGoal(Time.deltaTime);
         UpdateStuckRecovery();
         HandleDoorAction();
@@ -174,10 +215,24 @@ public class Visitor : MonoBehaviour
         _debugCanSeePlayer = CanSeePlayer();
         if (_debugCanSeePlayer)
         {
+            _hasPlayerMemory = true;
+            _lastSeenPlayerPosition = player.position;
+            _playerMemoryUntil = Time.time + playerMemoryDuration;
+            _investigateTarget = _lastSeenPlayerPosition;
+            _nextInvestigateRetargetTime = Time.time + investigateRetargetInterval;
             _goal = GoalType.ChasePlayer;
             _focusedDoor = null;
             return;
         }
+
+        if (_hasPlayerMemory && Time.time <= _playerMemoryUntil)
+        {
+            _goal = GoalType.InvestigatePlayer;
+            _focusedDoor = null;
+            return;
+        }
+
+        _hasPlayerMemory = false;
 
         Door visibleDoor = FindBestSearchDoor();
         if (visibleDoor != null)
@@ -202,9 +257,32 @@ public class Visitor : MonoBehaviour
 
         if (_goal == GoalType.ChasePlayer && player != null)
         {
+            float chaseDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(player.position));
+            if (chaseDistance <= catchDistance)
+            {
+                BeginCatchSequence();
+                return;
+            }
+
             _debugGoalTarget = player.position;
             MoveTowards(player.position, chaseSpeed, deltaTime);
             return;
+        }
+
+        if (_goal == GoalType.InvestigatePlayer)
+        {
+            if (!_hasPlayerMemory || Time.time > _playerMemoryUntil)
+            {
+                _hasPlayerMemory = false;
+                _goal = GoalType.Wander;
+            }
+            else
+            {
+                UpdateInvestigateTarget();
+                _debugGoalTarget = _investigateTarget;
+                MoveTowards(_investigateTarget, searchSpeed, deltaTime);
+                return;
+            }
         }
 
         if (_goal == GoalType.Door && _focusedDoor != null && !_focusedDoor.IsKickedDown)
@@ -252,6 +330,11 @@ public class Visitor : MonoBehaviour
 
     private void HandleDoorAction()
     {
+        if (_goal == GoalType.ChasePlayer || _goal == GoalType.InvestigatePlayer)
+        {
+            return;
+        }
+
         if (Time.time < _nextDoorActionTime)
         {
             return;
@@ -838,6 +921,17 @@ public class Visitor : MonoBehaviour
         return new Vector3(v.x, 0f, v.z);
     }
 
+    private void UpdateInvestigateTarget()
+    {
+        float flatDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(_investigateTarget));
+        if (flatDistance <= investigatePointReachedDistance || Time.time >= _nextInvestigateRetargetTime)
+        {
+            Vector2 offset = Random.insideUnitCircle * investigateRadius;
+            _investigateTarget = _lastSeenPlayerPosition + new Vector3(offset.x, 0f, offset.y);
+            _nextInvestigateRetargetTime = Time.time + investigateRetargetInterval;
+        }
+    }
+
     private void PlayKickSound()
     {
         if (audioSource == null || kickSounds == null || kickSounds.Length == 0)
@@ -851,6 +945,93 @@ public class Visitor : MonoBehaviour
         {
             audioSource.PlayOneShot(clip, kickSoundVolume);
         }
+    }
+
+    private void HandleChaseAudio(GoalType previousGoal, GoalType currentGoal)
+    {
+        if (_isCatchingPlayer)
+        {
+            StopChaseLoop();
+            return;
+        }
+
+        bool enteredChase = previousGoal != GoalType.ChasePlayer && currentGoal == GoalType.ChasePlayer;
+        bool exitedChase = previousGoal == GoalType.ChasePlayer && currentGoal != GoalType.ChasePlayer;
+
+        if (enteredChase)
+        {
+            StartChaseLoop();
+        }
+        else if (exitedChase)
+        {
+            StopChaseLoop();
+        }
+    }
+
+    private void StartChaseLoop()
+    {
+        if (chaseLoopAudioSource == null || chaseLoopClip == null)
+        {
+            return;
+        }
+
+        chaseLoopAudioSource.clip = chaseLoopClip;
+        chaseLoopAudioSource.loop = true;
+        chaseLoopAudioSource.volume = chaseLoopVolume;
+        if (!chaseLoopAudioSource.isPlaying)
+        {
+            chaseLoopAudioSource.Play();
+        }
+    }
+
+    private void StopChaseLoop()
+    {
+        if (chaseLoopAudioSource == null)
+        {
+            return;
+        }
+
+        if (chaseLoopAudioSource.isPlaying)
+        {
+            chaseLoopAudioSource.Stop();
+        }
+        chaseLoopAudioSource.loop = false;
+        chaseLoopAudioSource.clip = null;
+    }
+
+    private void BeginCatchSequence()
+    {
+        if (_isCatchingPlayer)
+        {
+            return;
+        }
+
+        _isCatchingPlayer = true;
+        StopChaseLoop();
+
+        float reloadDelay = sceneReloadDelay;
+        if (catchAudioSource != null && catchPlayerClip != null)
+        {
+            catchAudioSource.PlayOneShot(catchPlayerClip, catchPlayerVolume);
+            reloadDelay += catchPlayerClip.length;
+        }
+
+        if (_reloadCoroutine != null)
+        {
+            StopCoroutine(_reloadCoroutine);
+        }
+        _reloadCoroutine = StartCoroutine(ReloadSceneAfterDelay(reloadDelay));
+    }
+
+    private IEnumerator ReloadSceneAfterDelay(float delay)
+    {
+        if (delay > 0f)
+        {
+            yield return new WaitForSeconds(delay);
+        }
+
+        Scene activeScene = SceneManager.GetActiveScene();
+        SceneManager.LoadScene(activeScene.buildIndex);
     }
 
     private void CacheVisualFollowOffsets()
