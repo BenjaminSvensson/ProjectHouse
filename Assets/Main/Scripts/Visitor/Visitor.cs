@@ -16,6 +16,15 @@ public class Visitor : MonoBehaviour
         ChasePlayer
     }
 
+    private enum PanicActionType
+    {
+        None,
+        Backpedal,
+        StrafeLeft,
+        StrafeRight,
+        Spin
+    }
+
     [Header("References")]
     [SerializeField] private Transform eyes;
     [SerializeField] private Transform player;
@@ -45,12 +54,39 @@ public class Visitor : MonoBehaviour
     [SerializeField] private float searchPointReachedDistance = 1.2f;
     [SerializeField] private float lookAroundTurnSpeed = 95f;
 
+    [Header("NavMesh Recovery")]
+    [SerializeField] private float stuckCheckInterval = 0.3f;
+    [SerializeField] private float stuckMinMoveDistance = 0.05f;
+    [SerializeField] private float stuckTimeToTrigger = 1.0f;
+    [SerializeField] private float panicStuckTime = 2.0f;
+    [SerializeField] private float unstickSampleRadius = 2.8f;
+    [SerializeField] private int unstickSampleCount = 10;
+    [SerializeField] private float unstickTargetHoldTime = 0.8f;
+    [SerializeField] private float doorForceInteractDistance = 2.6f;
+
+    [Header("Panic Actions")]
+    [SerializeField] private float panicActionMinDuration = 0.4f;
+    [SerializeField] private float panicActionMaxDuration = 0.9f;
+    [SerializeField] private float panicActionCooldown = 1.0f;
+    [SerializeField] private float panicBackpedalSpeed = 2.4f;
+    [SerializeField] private float panicStrafeSpeed = 2.8f;
+    [SerializeField] private float panicSpinSpeed = 380f;
+    [SerializeField] private float panicHopHeight = 0.35f;
+    [SerializeField] private float panicHopDuration = 0.35f;
+
     [Header("Search Route")]
     [SerializeField] private List<Transform> searchLocations = new List<Transform>();
     [SerializeField] private bool loopSearchLocations = true;
     [SerializeField] private bool randomizeSearchLocations = false;
     [SerializeField] private float searchLocationReachedDistance = 1.6f;
     [SerializeField] private float searchLocationLookTime = 0.65f;
+    [SerializeField] private float searchLocationMaxTravelTime = 10f;
+    [SerializeField] private float searchLocationNoProgressTimeout = 2.2f;
+    [SerializeField] private float searchLocationProgressThreshold = 0.35f;
+    [SerializeField] private float searchLocationPathInvalidTimeout = 0.9f;
+
+    [Header("Destination Validation")]
+    [SerializeField] private float maxDestinationSampleOffset = 2.2f;
 
     [Header("Visual Follow")]
     [SerializeField] private bool followVisualRoot = false;
@@ -63,6 +99,10 @@ public class Visitor : MonoBehaviour
     [SerializeField] private float doorSearchPriorityRadius = 22f;
     [SerializeField] private float doorActionDistance = 1.75f;
     [SerializeField] private float doorDetectRadius = 0.24f;
+    [SerializeField] private float doorApproachOffset = 0.6f;
+    [SerializeField] private float doorTransitOffset = 0.95f;
+    [SerializeField] private float doorNavSampleRadius = 1.2f;
+    [SerializeField] private float doorDestinationSampleOffset = 3.8f;
     [SerializeField] private LayerMask doorMask = ~0;
     [SerializeField] private bool requireDoorInViewForSearch = false;
     [SerializeField] private float doorOpenCooldown = 0.4f;
@@ -99,6 +139,19 @@ public class Visitor : MonoBehaviour
     private float _nextRepathTime;
     private int _searchLocationIndex;
     private float _nextSearchLocationMoveTime;
+    private bool[] _searchLocationVisited;
+    private int _searchLocationsVisitedCount;
+    private float _searchLocationTargetStartTime;
+    private float _searchLocationLastProgressTime;
+    private float _searchLocationBestDistance = Mathf.Infinity;
+    private float _searchLocationPathIssueSince = -1f;
+    private Vector3 _lastStuckCheckPosition;
+    private float _nextStuckCheckTime;
+    private float _stuckAccumulatedTime;
+    private float _nextPanicAllowedTime;
+    private bool _hasTemporaryUnstickTarget;
+    private Vector3 _temporaryUnstickTarget;
+    private float _temporaryUnstickUntil;
     private bool _hasPlayerMemory;
     private float _playerMemoryUntil;
     private Vector3 _lastSeenPlayerPosition;
@@ -106,6 +159,7 @@ public class Visitor : MonoBehaviour
     private float _nextInvestigateRetargetTime;
 
     private readonly Dictionary<Door, int> _kickCounts = new Dictionary<Door, int>();
+    private readonly Dictionary<Door, Collider[]> _doorColliderCache = new Dictionary<Door, Collider[]>();
     private readonly Collider[] _doorOverlapHits = new Collider[24];
     private readonly RaycastHit[] _doorForwardHits = new RaycastHit[16];
 
@@ -113,10 +167,20 @@ public class Visitor : MonoBehaviour
     private Quaternion _visualYawOffset = Quaternion.identity;
     private bool _isCatchingPlayer;
     private Coroutine _reloadCoroutine;
+    private Coroutine _panicHopCoroutine;
+    private PanicActionType _panicAction = PanicActionType.None;
+    private float _panicActionUntil;
+    private float _baseAgentOffset;
 
     private Vector3 _debugGoalTarget;
     private bool _debugCanSeePlayer;
     private Door _debugDoorAhead;
+    private bool _debugIsStuck;
+    private Vector3 _debugUnstickTarget;
+    private int _debugUnstickAttempts;
+    private PanicActionType _debugPanicAction;
+    private Vector3 _debugDoorNavTarget;
+    private bool _debugHasDoorNavTarget;
 
     private void Awake()
     {
@@ -154,9 +218,12 @@ public class Visitor : MonoBehaviour
         {
             agent.updateRotation = false;
             agent.speed = searchSpeed;
+            _baseAgentOffset = agent.baseOffset;
         }
 
         _spawnPosition = transform.position;
+        _lastStuckCheckPosition = FlattenY(transform.position);
+        _nextStuckCheckTime = Time.time + stuckCheckInterval;
         CacheVisualFollowOffsets();
         ResolvePlayerReference();
         InitializeSearchRoute();
@@ -175,6 +242,7 @@ public class Visitor : MonoBehaviour
         EvaluateGoal();
         HandleChaseAudio(previousGoal, _goal);
         ExecuteGoal(Time.deltaTime);
+        UpdateStuckRecovery();
         HandleDoorAction();
         UpdateFacingFromAgent(Time.deltaTime);
     }
@@ -226,6 +294,29 @@ public class Visitor : MonoBehaviour
     private void ExecuteGoal(float deltaTime)
     {
         _debugGoalTarget = transform.position;
+        _debugPanicAction = _panicAction;
+        _debugHasDoorNavTarget = false;
+
+        if (HandlePanicAction(deltaTime))
+        {
+            return;
+        }
+
+        if (_hasTemporaryUnstickTarget && Time.time < _temporaryUnstickUntil && _goal != GoalType.ChasePlayer)
+        {
+            float unstickDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(_temporaryUnstickTarget));
+            if (unstickDistance <= Mathf.Max(0.45f, searchPointReachedDistance * 0.5f))
+            {
+                _hasTemporaryUnstickTarget = false;
+            }
+            else
+            {
+                SetAgentSpeed(searchSpeed);
+                _debugGoalTarget = _temporaryUnstickTarget;
+                TrySetDestination(_temporaryUnstickTarget, true, unstickSampleRadius + 1f);
+                return;
+            }
+        }
 
         if (_goal == GoalType.ChasePlayer && player != null)
         {
@@ -254,16 +345,27 @@ public class Visitor : MonoBehaviour
                 UpdateInvestigateTarget();
                 SetAgentSpeed(searchSpeed);
                 _debugGoalTarget = _investigateTarget;
-                TrySetDestination(_investigateTarget);
+                if (!TrySetDestination(_investigateTarget))
+                {
+                    _nextInvestigateRetargetTime = 0f;
+                }
                 return;
             }
         }
 
         if (_goal == GoalType.Door && _focusedDoor != null && !_focusedDoor.IsKickedDown)
         {
+            Vector3 doorTarget = GetDoorApproachPoint(_focusedDoor, transform.position);
             SetAgentSpeed(searchSpeed);
-            _debugGoalTarget = _focusedDoor.transform.position;
-            TrySetDestination(_focusedDoor.transform.position);
+            _debugGoalTarget = doorTarget;
+            _debugDoorNavTarget = doorTarget;
+            _debugHasDoorNavTarget = true;
+            if (!TrySetDestination(doorTarget, false, doorDestinationSampleOffset))
+            {
+                _focusedDoor = null;
+                _goal = GoalType.Wander;
+                PickNewWanderTarget();
+            }
             return;
         }
 
@@ -280,6 +382,12 @@ public class Visitor : MonoBehaviour
 
         float reachedDistance = searchLocations.Count > 0 ? searchLocationReachedDistance : searchPointReachedDistance;
         float distanceToWanderPoint = Vector3.Distance(FlattenY(transform.position), FlattenY(_wanderTarget));
+        if (searchLocations.Count > 0 && ShouldSkipCurrentSearchLocation(distanceToWanderPoint, reachedDistance))
+        {
+            AdvanceSearchLocation(true);
+            return;
+        }
+
         if (distanceToWanderPoint <= reachedDistance)
         {
             _debugGoalTarget = _wanderTarget;
@@ -287,6 +395,7 @@ public class Visitor : MonoBehaviour
 
             if (searchLocations.Count > 0)
             {
+                MarkCurrentSearchLocationVisited();
                 bool hasNearbySearchableDoor = HasSearchableDoorNearPosition(transform.position, doorViewDistance);
                 AdvanceSearchLocation(!hasNearbySearchableDoor);
                 return;
@@ -301,7 +410,22 @@ public class Visitor : MonoBehaviour
 
         SetAgentSpeed(searchSpeed);
         _debugGoalTarget = _wanderTarget;
-        TrySetDestination(_wanderTarget);
+        if (!TrySetDestination(_wanderTarget))
+        {
+            if (TryRouteViaNearbyDoor(_wanderTarget))
+            {
+                return;
+            }
+
+            if (searchLocations.Count > 0)
+            {
+                AdvanceSearchLocation(true);
+            }
+            else
+            {
+                PickNewWanderTarget();
+            }
+        }
     }
 
     private void HandleDoorAction()
@@ -326,7 +450,8 @@ public class Visitor : MonoBehaviour
             return;
         }
 
-        float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(door.transform.position));
+        Vector3 doorActionPoint = GetDoorApproachPoint(door, transform.position);
+        float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(doorActionPoint));
         if (distanceToDoor > doorActionDistance)
         {
             return;
@@ -346,29 +471,41 @@ public class Visitor : MonoBehaviour
         }
     }
 
-    private void TrySetDestination(Vector3 target)
+    private bool TrySetDestination(Vector3 target, bool forceRepath = false, float allowedSampleOffset = -1f)
     {
         if (agent == null || !agent.enabled || !agent.isOnNavMesh)
         {
-            return;
+            return false;
         }
 
-        if (Time.time < _nextRepathTime)
+        if (!forceRepath && Time.time < _nextRepathTime)
         {
-            return;
+            return true;
         }
 
         Vector3 targetFlat = FlattenY(target) + Vector3.up * transform.position.y;
+        Vector3 destination = targetFlat;
+        bool usedSample = false;
         if (NavMesh.SamplePosition(targetFlat, out NavMeshHit sample, 3f, NavMesh.AllAreas))
         {
-            agent.SetDestination(sample.position);
-        }
-        else
-        {
-            agent.SetDestination(targetFlat);
+            destination = sample.position;
+            usedSample = true;
         }
 
+        float maxOffset = allowedSampleOffset >= 0f ? allowedSampleOffset : maxDestinationSampleOffset;
+        if (usedSample && maxOffset > 0f)
+        {
+            float sampleOffset = Vector3.Distance(FlattenY(targetFlat), FlattenY(destination));
+            if (sampleOffset > maxOffset)
+            {
+                _nextRepathTime = Time.time + repathInterval * 0.35f;
+                return false;
+            }
+        }
+
+        bool destinationSet = agent.SetDestination(destination);
         _nextRepathTime = Time.time + repathInterval;
+        return destinationSet;
     }
 
     private void SetAgentSpeed(float speed)
@@ -397,6 +534,488 @@ public class Visitor : MonoBehaviour
 
         Quaternion targetRotation = Quaternion.LookRotation(desiredDirection.normalized, Vector3.up);
         transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRotation, turnSpeed * deltaTime);
+    }
+
+    private void UpdateStuckRecovery()
+    {
+        if (agent == null || !agent.enabled || !agent.isOnNavMesh)
+        {
+            return;
+        }
+
+        if (_panicAction != PanicActionType.None)
+        {
+            _lastStuckCheckPosition = FlattenY(transform.position);
+            _nextStuckCheckTime = Time.time + stuckCheckInterval;
+            return;
+        }
+
+        bool isTryingToMove = agent.hasPath
+            && !agent.pathPending
+            && agent.remainingDistance > Mathf.Max(agent.stoppingDistance + 0.25f, 0.75f);
+
+        if (!isTryingToMove)
+        {
+            _stuckAccumulatedTime = Mathf.Max(0f, _stuckAccumulatedTime - Time.deltaTime);
+            _debugIsStuck = false;
+            _lastStuckCheckPosition = FlattenY(transform.position);
+            _nextStuckCheckTime = Time.time + stuckCheckInterval;
+            return;
+        }
+
+        if (Time.time < _nextStuckCheckTime)
+        {
+            return;
+        }
+
+        Vector3 currentPosition = FlattenY(transform.position);
+        float moved = Vector3.Distance(currentPosition, _lastStuckCheckPosition);
+        if (moved < stuckMinMoveDistance)
+        {
+            _stuckAccumulatedTime += stuckCheckInterval;
+        }
+        else
+        {
+            _stuckAccumulatedTime = Mathf.Max(0f, _stuckAccumulatedTime - stuckCheckInterval * 0.5f);
+        }
+
+        _debugIsStuck = _stuckAccumulatedTime > 0.01f;
+        if (_stuckAccumulatedTime >= panicStuckTime && Time.time >= _nextPanicAllowedTime)
+        {
+            TriggerPanicAction();
+            _stuckAccumulatedTime = stuckTimeToTrigger * 0.6f;
+            _nextPanicAllowedTime = Time.time + panicActionCooldown;
+            _lastStuckCheckPosition = currentPosition;
+            _nextStuckCheckTime = Time.time + stuckCheckInterval;
+            return;
+        }
+
+        if (_stuckAccumulatedTime >= stuckTimeToTrigger)
+        {
+            AttemptUnstick();
+            _stuckAccumulatedTime = Mathf.Min(_stuckAccumulatedTime, panicStuckTime * 0.75f);
+        }
+
+        _lastStuckCheckPosition = currentPosition;
+        _nextStuckCheckTime = Time.time + stuckCheckInterval;
+    }
+
+    private bool HandlePanicAction(float deltaTime)
+    {
+        if (_panicAction == PanicActionType.None || Time.time >= _panicActionUntil)
+        {
+            if (_panicAction != PanicActionType.None)
+            {
+                _panicAction = PanicActionType.None;
+                if (agent != null)
+                {
+                    agent.baseOffset = _baseAgentOffset;
+                }
+            }
+            return false;
+        }
+
+        if (agent == null || !agent.enabled || !agent.isOnNavMesh)
+        {
+            return false;
+        }
+
+        // Drop current path so panic action is not overridden by NavMesh steering.
+        agent.ResetPath();
+
+        switch (_panicAction)
+        {
+            case PanicActionType.Backpedal:
+                agent.Move(-transform.forward * panicBackpedalSpeed * deltaTime);
+                break;
+            case PanicActionType.StrafeLeft:
+                agent.Move(-transform.right * panicStrafeSpeed * deltaTime);
+                break;
+            case PanicActionType.StrafeRight:
+                agent.Move(transform.right * panicStrafeSpeed * deltaTime);
+                break;
+            case PanicActionType.Spin:
+                transform.Rotate(0f, panicSpinSpeed * deltaTime, 0f, Space.Self);
+                break;
+        }
+
+        return true;
+    }
+
+    private void TriggerPanicAction()
+    {
+        int actionIndex = Random.Range(0, 4);
+        _panicAction = (PanicActionType)(actionIndex + 1);
+        _panicActionUntil = Time.time + Random.Range(panicActionMinDuration, panicActionMaxDuration);
+
+        if (_hasTemporaryUnstickTarget)
+        {
+            _hasTemporaryUnstickTarget = false;
+        }
+
+        if (_panicHopCoroutine != null)
+        {
+            StopCoroutine(_panicHopCoroutine);
+        }
+
+        // Frequent mini-hop to break collision deadlocks around rotating doors.
+        if (Random.value < 0.7f)
+        {
+            _panicHopCoroutine = StartCoroutine(PanicHopRoutine());
+        }
+    }
+
+    private IEnumerator PanicHopRoutine()
+    {
+        if (agent == null || !agent.enabled)
+        {
+            yield break;
+        }
+
+        float duration = Mathf.Max(0.1f, panicHopDuration);
+        float elapsed = 0f;
+        while (elapsed < duration && agent != null && agent.enabled)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.Clamp01(elapsed / duration);
+            float arc = Mathf.Sin(t * Mathf.PI);
+            agent.baseOffset = _baseAgentOffset + panicHopHeight * arc;
+            yield return null;
+        }
+
+        if (agent != null)
+        {
+            agent.baseOffset = _baseAgentOffset;
+        }
+
+        _panicHopCoroutine = null;
+    }
+
+    private void AttemptUnstick()
+    {
+        if (TryForceDoorAction())
+        {
+            return;
+        }
+
+        Vector3 transitTarget = _goal == GoalType.Wander ? _wanderTarget : transform.position + transform.forward * 2f;
+        if (TryRouteViaNearbyDoor(transitTarget))
+        {
+            return;
+        }
+
+        if (!TryPickTemporaryUnstickTarget(out Vector3 target, out int attempts))
+        {
+            if (_goal == GoalType.Wander && searchLocations.Count > 1)
+            {
+                AdvanceSearchLocation(true);
+            }
+            return;
+        }
+
+        _debugUnstickAttempts = attempts;
+        _debugUnstickTarget = target;
+        _hasTemporaryUnstickTarget = true;
+        _temporaryUnstickTarget = target;
+        _temporaryUnstickUntil = Time.time + unstickTargetHoldTime;
+        TrySetDestination(_temporaryUnstickTarget, true, unstickSampleRadius + 1f);
+    }
+
+    private bool TryForceDoorAction()
+    {
+        Door door;
+        RaycastHit hit;
+        if (TryFindDoorAhead(out door, out hit))
+        {
+            Vector3 doorActionPoint = GetDoorApproachPoint(door, transform.position);
+            float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(doorActionPoint));
+            if (distanceToDoor <= doorForceInteractDistance)
+            {
+                if (door.IsLocked)
+                {
+                    KickDoor(door, hit.point);
+                }
+                else if (!door.IsOpen)
+                {
+                    door.Interact();
+                    _nextDoorActionTime = Time.time + doorOpenCooldown * 0.5f;
+                }
+                return true;
+            }
+        }
+
+        if (TryFindNearbyBlockingDoor(out door))
+        {
+            Vector3 doorActionPoint = GetDoorApproachPoint(door, transform.position);
+            float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(doorActionPoint));
+            if (distanceToDoor <= doorForceInteractDistance)
+            {
+                if (door.IsLocked)
+                {
+                    KickDoor(door, doorActionPoint);
+                }
+                else if (!door.IsOpen)
+                {
+                    door.Interact();
+                    _nextDoorActionTime = Time.time + doorOpenCooldown * 0.5f;
+                }
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryFindNearbyBlockingDoor(out Door nearestDoor)
+    {
+        nearestDoor = null;
+        int hitCount = Physics.OverlapSphereNonAlloc(
+            transform.position,
+            doorForceInteractDistance,
+            _doorOverlapHits,
+            doorMask,
+            QueryTriggerInteraction.Ignore
+        );
+
+        float nearestDistance = float.MaxValue;
+        Vector3 moveDirection = agent != null && agent.desiredVelocity.sqrMagnitude > 0.05f
+            ? agent.desiredVelocity.normalized
+            : transform.forward;
+
+        for (int i = 0; i < hitCount; i++)
+        {
+            Collider hitCollider = _doorOverlapHits[i];
+            if (hitCollider == null)
+            {
+                continue;
+            }
+
+            Door door = hitCollider.GetComponentInParent<Door>();
+            if (door == null || door.IsKickedDown || door.IsOpen)
+            {
+                continue;
+            }
+
+            Vector3 doorPoint = GetDoorReferencePoint(door);
+            Vector3 toDoor = FlattenY(doorPoint - transform.position);
+            if (toDoor.sqrMagnitude < 0.0001f)
+            {
+                continue;
+            }
+
+            if (Vector3.Dot(toDoor.normalized, FlattenY(moveDirection).normalized) < -0.2f)
+            {
+                continue;
+            }
+
+            float distance = toDoor.magnitude;
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearestDoor = door;
+            }
+        }
+
+        return nearestDoor != null;
+    }
+
+    private bool TryPickTemporaryUnstickTarget(out Vector3 target, out int attemptsUsed)
+    {
+        target = transform.position;
+        attemptsUsed = 0;
+
+        if (agent == null || !agent.isOnNavMesh)
+        {
+            return false;
+        }
+
+        Vector3 origin = transform.position;
+        int attempts = Mathf.Max(1, unstickSampleCount);
+        for (int i = 0; i < attempts; i++)
+        {
+            attemptsUsed = i + 1;
+            Vector2 offset = Random.insideUnitCircle * Mathf.Max(0.5f, unstickSampleRadius);
+            Vector3 candidate = origin + new Vector3(offset.x, 0f, offset.y);
+
+            if (!NavMesh.SamplePosition(candidate, out NavMeshHit sample, 1.8f, NavMesh.AllAreas))
+            {
+                continue;
+            }
+
+            if (NavMesh.Raycast(origin, sample.position, out _, NavMesh.AllAreas))
+            {
+                continue;
+            }
+
+            target = sample.position;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryRouteViaNearbyDoor(Vector3 towardTarget)
+    {
+        Door doorToUse = null;
+        if (_focusedDoor != null && !_focusedDoor.IsKickedDown)
+        {
+            doorToUse = _focusedDoor;
+        }
+        else if (!TryFindNearbyBlockingDoor(out doorToUse))
+        {
+            return false;
+        }
+
+        if (!TryGetDoorTransitPoint(doorToUse, towardTarget, out Vector3 transitPoint))
+        {
+            return false;
+        }
+
+        _hasTemporaryUnstickTarget = true;
+        _temporaryUnstickTarget = transitPoint;
+        _temporaryUnstickUntil = Time.time + Mathf.Max(0.6f, unstickTargetHoldTime);
+        _debugDoorNavTarget = transitPoint;
+        _debugHasDoorNavTarget = true;
+        bool routed = TrySetDestination(transitPoint, true, doorDestinationSampleOffset);
+        if (!routed)
+        {
+            _hasTemporaryUnstickTarget = false;
+        }
+        return routed;
+    }
+
+    private Vector3 GetDoorReferencePoint(Door door)
+    {
+        if (door == null)
+        {
+            return transform.position;
+        }
+
+        Vector3 fromPosition = transform.position;
+        Vector3 referencePoint = door.transform.position;
+        Collider[] doorColliders = GetDoorColliders(door);
+        float bestDistance = float.MaxValue;
+
+        for (int i = 0; i < doorColliders.Length; i++)
+        {
+            Collider doorCollider = doorColliders[i];
+            if (doorCollider == null || !doorCollider.enabled)
+            {
+                continue;
+            }
+
+            Vector3 candidate = doorCollider.ClosestPoint(fromPosition);
+            float candidateDistance = (candidate - fromPosition).sqrMagnitude;
+            if (candidateDistance < bestDistance)
+            {
+                bestDistance = candidateDistance;
+                referencePoint = candidate;
+            }
+        }
+
+        referencePoint.y = transform.position.y;
+        return referencePoint;
+    }
+
+    private Collider[] GetDoorColliders(Door door)
+    {
+        if (door == null)
+        {
+            return null;
+        }
+
+        if (_doorColliderCache.TryGetValue(door, out Collider[] cached) && cached != null && cached.Length > 0)
+        {
+            return cached;
+        }
+
+        Collider[] fetched = door.GetComponentsInChildren<Collider>(true);
+        _doorColliderCache[door] = fetched;
+        return fetched;
+    }
+
+    private Vector3 GetDoorNormal(Door door)
+    {
+        if (door == null)
+        {
+            return FlattenY(transform.forward).normalized;
+        }
+
+        Vector3 normal = FlattenY(door.transform.forward);
+        if (normal.sqrMagnitude <= 0.0001f)
+        {
+            normal = FlattenY(door.transform.right);
+        }
+        if (normal.sqrMagnitude <= 0.0001f)
+        {
+            normal = FlattenY(transform.forward);
+        }
+
+        return normal.normalized;
+    }
+
+    private bool TrySampleNavMeshNear(Vector3 point, float sampleRadius, out Vector3 sampledPoint)
+    {
+        Vector3 flatPoint = FlattenY(point) + Vector3.up * transform.position.y;
+        float radius = Mathf.Max(0.25f, sampleRadius);
+        if (NavMesh.SamplePosition(flatPoint, out NavMeshHit sample, radius, NavMesh.AllAreas))
+        {
+            sampledPoint = sample.position;
+            return true;
+        }
+
+        sampledPoint = flatPoint;
+        return false;
+    }
+
+    private Vector3 GetDoorApproachPoint(Door door, Vector3 fromPosition)
+    {
+        Vector3 referencePoint = GetDoorReferencePoint(door);
+        Vector3 toDoor = FlattenY(referencePoint - fromPosition);
+        Vector3 approachDirection = toDoor.sqrMagnitude > 0.0001f ? toDoor.normalized : GetDoorNormal(door);
+
+        Vector3 candidate = referencePoint - approachDirection * Mathf.Max(0.1f, doorApproachOffset);
+        if (TrySampleNavMeshNear(candidate, doorNavSampleRadius, out Vector3 approachPoint))
+        {
+            return approachPoint;
+        }
+
+        if (TrySampleNavMeshNear(referencePoint, doorNavSampleRadius, out Vector3 fallbackPoint))
+        {
+            return fallbackPoint;
+        }
+
+        return referencePoint;
+    }
+
+    private bool TryGetDoorTransitPoint(Door door, Vector3 towardTarget, out Vector3 transitPoint)
+    {
+        transitPoint = GetDoorApproachPoint(door, transform.position);
+        if (door == null)
+        {
+            return false;
+        }
+
+        Vector3 referencePoint = GetDoorReferencePoint(door);
+        Vector3 doorwayNormal = GetDoorNormal(door);
+        float offset = Mathf.Max(0.2f, doorTransitOffset);
+
+        Vector3 sideA = referencePoint + doorwayNormal * offset;
+        Vector3 sideB = referencePoint - doorwayNormal * offset;
+
+        bool hasA = TrySampleNavMeshNear(sideA, doorNavSampleRadius, out Vector3 sampledA);
+        bool hasB = TrySampleNavMeshNear(sideB, doorNavSampleRadius, out Vector3 sampledB);
+        if (!hasA && !hasB)
+        {
+            return false;
+        }
+
+        Vector3 targetFlat = FlattenY(towardTarget);
+        float scoreA = hasA ? Vector3.Distance(FlattenY(sampledA), targetFlat) : float.MaxValue;
+        float scoreB = hasB ? Vector3.Distance(FlattenY(sampledB), targetFlat) : float.MaxValue;
+
+        transitPoint = scoreA <= scoreB ? sampledA : sampledB;
+        return true;
     }
 
     private Door FindBestSearchDoor()
@@ -428,7 +1047,7 @@ public class Visitor : MonoBehaviour
                 continue;
             }
 
-            Vector3 doorPoint = door.transform.position;
+            Vector3 doorPoint = GetDoorReferencePoint(door);
             if (requireDoorInViewForSearch && !CanSeePoint(doorPoint, door.transform))
             {
                 continue;
@@ -467,13 +1086,22 @@ public class Visitor : MonoBehaviour
                 direction = v.normalized;
             }
         }
+        else if (agent != null && agent.hasPath && agent.path.corners.Length > 1)
+        {
+            Vector3 toCorner = agent.path.corners[1] - transform.position;
+            toCorner.y = 0f;
+            if (toCorner.sqrMagnitude > 0.0001f)
+            {
+                direction = toCorner.normalized;
+            }
+        }
 
         int hitCount = Physics.SphereCastNonAlloc(
             origin,
             doorDetectRadius,
             direction,
             _doorForwardHits,
-            Mathf.Max(doorActionDistance, 0.5f),
+            Mathf.Max(doorActionDistance + 0.8f, 0.8f),
             doorMask,
             QueryTriggerInteraction.Ignore
         );
@@ -517,14 +1145,15 @@ public class Visitor : MonoBehaviour
         currentKicks++;
         if (currentKicks >= kicksToBreakLockedDoor)
         {
-            Vector3 forceDirection = FlattenY(door.transform.position - transform.position).normalized;
+            Vector3 doorPoint = GetDoorReferencePoint(door);
+            Vector3 forceDirection = FlattenY(doorPoint - transform.position).normalized;
             if (forceDirection.sqrMagnitude <= 0.0001f)
             {
                 forceDirection = transform.forward;
             }
 
             Vector3 kickImpulse = forceDirection * kickForce + Vector3.up * kickUpwardForce;
-            Vector3 resolvedHitPoint = hitPoint.sqrMagnitude > 0.0001f ? hitPoint : door.transform.position;
+            Vector3 resolvedHitPoint = hitPoint.sqrMagnitude > 0.0001f ? hitPoint : doorPoint;
             door.KickDown(kickImpulse, resolvedHitPoint);
             _kickCounts.Remove(door);
         }
@@ -599,6 +1228,7 @@ public class Visitor : MonoBehaviour
         if (searchLocations.Count > 0)
         {
             _wanderTarget = searchLocations[_searchLocationIndex].position;
+            RefreshSearchLocationTracking();
             _debugGoalTarget = _wanderTarget;
             return;
         }
@@ -620,10 +1250,13 @@ public class Visitor : MonoBehaviour
 
         if (searchLocations.Count == 0)
         {
+            _searchLocationVisited = null;
+            _searchLocationsVisitedCount = 0;
             return;
         }
 
         _searchLocationIndex = Mathf.Clamp(_searchLocationIndex, 0, searchLocations.Count - 1);
+        EnsureSearchLocationVisitedState(true);
         if (randomizeSearchLocations)
         {
             _searchLocationIndex = Random.Range(0, searchLocations.Count);
@@ -631,6 +1264,7 @@ public class Visitor : MonoBehaviour
 
         _wanderTarget = searchLocations[_searchLocationIndex].position;
         _nextSearchLocationMoveTime = 0f;
+        RefreshSearchLocationTracking();
     }
 
     private void AdvanceSearchLocation(bool moveImmediately)
@@ -640,30 +1274,202 @@ public class Visitor : MonoBehaviour
             return;
         }
 
+        MarkCurrentSearchLocationVisited();
         _nextSearchLocationMoveTime = moveImmediately ? Time.time : Time.time + searchLocationLookTime;
-        if (randomizeSearchLocations)
-        {
-            int nextIndex = _searchLocationIndex;
-            if (searchLocations.Count > 1)
-            {
-                while (nextIndex == _searchLocationIndex)
-                {
-                    nextIndex = Random.Range(0, searchLocations.Count);
-                }
-            }
+        _searchLocationIndex = GetNextSearchLocationIndex();
+        _wanderTarget = searchLocations[_searchLocationIndex].position;
+        RefreshSearchLocationTracking();
+    }
 
-            _searchLocationIndex = nextIndex;
-            _wanderTarget = searchLocations[_searchLocationIndex].position;
+    private void EnsureSearchLocationVisitedState(bool resetVisited = false)
+    {
+        int count = searchLocations.Count;
+        if (count <= 0)
+        {
+            _searchLocationVisited = null;
+            _searchLocationsVisitedCount = 0;
             return;
         }
 
-        _searchLocationIndex++;
-        if (_searchLocationIndex >= searchLocations.Count)
+        bool rebuild = _searchLocationVisited == null || _searchLocationVisited.Length != count;
+        if (rebuild)
         {
-            _searchLocationIndex = loopSearchLocations ? 0 : searchLocations.Count - 1;
+            _searchLocationVisited = new bool[count];
+            _searchLocationsVisitedCount = 0;
+            return;
         }
 
-        _wanderTarget = searchLocations[_searchLocationIndex].position;
+        if (!resetVisited)
+        {
+            return;
+        }
+
+        for (int i = 0; i < _searchLocationVisited.Length; i++)
+        {
+            _searchLocationVisited[i] = false;
+        }
+        _searchLocationsVisitedCount = 0;
+    }
+
+    private void MarkCurrentSearchLocationVisited()
+    {
+        if (searchLocations.Count == 0)
+        {
+            return;
+        }
+
+        EnsureSearchLocationVisitedState();
+        int index = Mathf.Clamp(_searchLocationIndex, 0, searchLocations.Count - 1);
+        if (_searchLocationVisited[index])
+        {
+            return;
+        }
+
+        _searchLocationVisited[index] = true;
+        _searchLocationsVisitedCount++;
+    }
+
+    private int GetNextSearchLocationIndex()
+    {
+        int count = searchLocations.Count;
+        if (count <= 1)
+        {
+            return 0;
+        }
+
+        EnsureSearchLocationVisitedState();
+        if (_searchLocationsVisitedCount >= count)
+        {
+            if (!loopSearchLocations && !randomizeSearchLocations)
+            {
+                return Mathf.Clamp(_searchLocationIndex, 0, count - 1);
+            }
+
+            EnsureSearchLocationVisitedState(true);
+        }
+
+        int current = Mathf.Clamp(_searchLocationIndex, 0, count - 1);
+        if (randomizeSearchLocations)
+        {
+            int start = Random.Range(0, count);
+            int fallback = current;
+            for (int offset = 0; offset < count; offset++)
+            {
+                int index = (start + offset) % count;
+                if (index == current)
+                {
+                    continue;
+                }
+
+                if (!_searchLocationVisited[index])
+                {
+                    return index;
+                }
+
+                fallback = index;
+            }
+
+            return fallback;
+        }
+
+        if (loopSearchLocations)
+        {
+            for (int offset = 1; offset <= count; offset++)
+            {
+                int index = (current + offset) % count;
+                if (!_searchLocationVisited[index])
+                {
+                    return index;
+                }
+            }
+
+            return (current + 1) % count;
+        }
+
+        for (int index = current + 1; index < count; index++)
+        {
+            if (!_searchLocationVisited[index])
+            {
+                return index;
+            }
+        }
+
+        for (int index = 0; index < current; index++)
+        {
+            if (!_searchLocationVisited[index])
+            {
+                return index;
+            }
+        }
+
+        return count - 1;
+    }
+
+    private void RefreshSearchLocationTracking()
+    {
+        _searchLocationTargetStartTime = Time.time;
+        _searchLocationLastProgressTime = Time.time;
+        _searchLocationPathIssueSince = -1f;
+
+        if (searchLocations.Count == 0)
+        {
+            _searchLocationBestDistance = Mathf.Infinity;
+            return;
+        }
+
+        _searchLocationBestDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(_wanderTarget));
+    }
+
+    private bool ShouldSkipCurrentSearchLocation(float distanceToTarget, float reachedDistance)
+    {
+        if (searchLocations.Count == 0)
+        {
+            return false;
+        }
+
+        if (Time.time < _nextSearchLocationMoveTime)
+        {
+            return false;
+        }
+
+        if (distanceToTarget <= reachedDistance + 0.05f)
+        {
+            return false;
+        }
+
+        if (distanceToTarget + searchLocationProgressThreshold < _searchLocationBestDistance)
+        {
+            _searchLocationBestDistance = distanceToTarget;
+            _searchLocationLastProgressTime = Time.time;
+            _searchLocationPathIssueSince = -1f;
+        }
+
+        bool noProgressTooLong = Time.time - _searchLocationLastProgressTime >= searchLocationNoProgressTimeout;
+        bool travelTimedOut = Time.time - _searchLocationTargetStartTime >= searchLocationMaxTravelTime;
+
+        bool hasPathIssue = false;
+        if (agent != null && agent.enabled && agent.isOnNavMesh && !agent.pathPending)
+        {
+            bool invalidPath = !agent.hasPath || agent.pathStatus == NavMeshPathStatus.PathInvalid;
+            bool partialPathFarAway = agent.pathStatus == NavMeshPathStatus.PathPartial
+                && agent.remainingDistance > Mathf.Max(reachedDistance + 1f, 2f);
+
+            if (invalidPath || partialPathFarAway)
+            {
+                if (_searchLocationPathIssueSince < 0f)
+                {
+                    _searchLocationPathIssueSince = Time.time;
+                }
+
+                hasPathIssue = Time.time - _searchLocationPathIssueSince >= searchLocationPathInvalidTimeout;
+            }
+            else
+            {
+                _searchLocationPathIssueSince = -1f;
+            }
+        }
+
+        return noProgressTooLong || travelTimedOut || hasPathIssue;
     }
 
     private bool HasSearchableDoorNearPosition(Vector3 position, float radius)
@@ -915,13 +1721,22 @@ public class Visitor : MonoBehaviour
             if (_focusedDoor != null)
             {
                 Gizmos.color = Color.blue;
-                Gizmos.DrawLine(transform.position + Vector3.up * 0.25f, _focusedDoor.transform.position + Vector3.up * 0.25f);
+                Vector3 focusedDoorPoint = GetDoorApproachPoint(_focusedDoor, transform.position);
+                Gizmos.DrawLine(transform.position + Vector3.up * 0.25f, focusedDoorPoint + Vector3.up * 0.25f);
             }
 
             if (_debugDoorAhead != null)
             {
                 Gizmos.color = Color.red;
-                Gizmos.DrawWireSphere(_debugDoorAhead.transform.position + Vector3.up * 0.2f, 0.28f);
+                Vector3 aheadDoorPoint = GetDoorApproachPoint(_debugDoorAhead, transform.position);
+                Gizmos.DrawWireSphere(aheadDoorPoint + Vector3.up * 0.2f, 0.28f);
+            }
+
+            if (_debugHasDoorNavTarget)
+            {
+                Gizmos.color = Color.cyan;
+                Gizmos.DrawLine(transform.position + Vector3.up * 0.22f, _debugDoorNavTarget + Vector3.up * 0.22f);
+                Gizmos.DrawWireSphere(_debugDoorNavTarget + Vector3.up * 0.22f, 0.2f);
             }
         }
 
@@ -933,6 +1748,26 @@ public class Visitor : MonoBehaviour
             {
                 Gizmos.DrawLine(corners[i], corners[i + 1]);
             }
+
+            if (_debugIsStuck)
+            {
+                Gizmos.color = new Color(1f, 0.2f, 0.2f, 0.9f);
+                Gizmos.DrawWireSphere(transform.position + Vector3.up * 0.2f, 0.35f);
+            }
+
+            if (_hasTemporaryUnstickTarget)
+            {
+                Gizmos.color = new Color(1f, 0.5f, 0f, 0.9f);
+                Gizmos.DrawLine(transform.position + Vector3.up * 0.2f, _temporaryUnstickTarget + Vector3.up * 0.2f);
+                Gizmos.DrawWireSphere(_temporaryUnstickTarget + Vector3.up * 0.2f, 0.25f);
+            }
+        }
+
+        if (_debugPanicAction != PanicActionType.None)
+        {
+            Gizmos.color = new Color(1f, 0.2f, 1f, 0.95f);
+            Gizmos.DrawWireSphere(transform.position + Vector3.up * 1.05f, 0.22f);
+            Gizmos.DrawLine(transform.position + Vector3.up * 0.2f, transform.position + Vector3.up * 1.05f);
         }
     }
 }
