@@ -4,7 +4,7 @@ using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.SceneManagement;
 
-[RequireComponent(typeof(NavMeshAgent))]
+[RequireComponent(typeof(NavMeshAgent))] 
 public class Visitor : MonoBehaviour
 {
     private enum GoalType
@@ -38,6 +38,10 @@ public class Visitor : MonoBehaviour
     [SerializeField, Range(5f, 179f)] private float viewAngle = 95f;
     [SerializeField] private LayerMask visionBlockerMask = ~0;
     [SerializeField] private float playerEyeOffset = 1f;
+    [SerializeField] private float playerChestOffset = 0.6f;
+    [SerializeField] private float playerFootOffset = 0.15f;
+    [SerializeField] private float closeRangeSightDistance = 3.2f;
+    [SerializeField] private float closeRangeViewAngleBonus = 40f;
 
     [Header("Player Memory")]
     [SerializeField] private float playerMemoryDuration = 7f;
@@ -53,12 +57,19 @@ public class Visitor : MonoBehaviour
     [SerializeField] private float searchRadius = 14f;
     [SerializeField] private float searchPointReachedDistance = 1.2f;
     [SerializeField] private float lookAroundTurnSpeed = 95f;
+    [SerializeField] private float idleLookSweepTurnSpeed = 58f;
+    [SerializeField] private float idleLookSweepSwitchMinTime = 0.85f;
+    [SerializeField] private float idleLookSweepSwitchMaxTime = 2.2f;
+    [SerializeField] private float doorFocusTurnSpeed = 300f;
+    [SerializeField] private float doorInteractFacingAngle = 24f;
 
     [Header("NavMesh Recovery")]
     [SerializeField] private float stuckCheckInterval = 0.3f;
-    [SerializeField] private float stuckMinMoveDistance = 0.05f;
-    [SerializeField] private float stuckTimeToTrigger = 1.0f;
-    [SerializeField] private float panicStuckTime = 2.0f;
+    [SerializeField] private float stuckMinMoveDistance = 0.08f;
+    [SerializeField] private float stuckTimeToTrigger = 0.6f;
+    [SerializeField] private float panicStuckTime = 1.1f;
+    [SerializeField] private float doorStuckThresholdMultiplier = 0.6f;
+    [SerializeField] private float doorStuckAccumulationMultiplier = 1.5f;
     [SerializeField] private float unstickSampleRadius = 2.8f;
     [SerializeField] private int unstickSampleCount = 10;
     [SerializeField] private float unstickTargetHoldTime = 0.8f;
@@ -67,7 +78,7 @@ public class Visitor : MonoBehaviour
     [Header("Panic Actions")]
     [SerializeField] private float panicActionMinDuration = 0.4f;
     [SerializeField] private float panicActionMaxDuration = 0.9f;
-    [SerializeField] private float panicActionCooldown = 1.0f;
+    [SerializeField] private float panicActionCooldown = 0.35f;
     [SerializeField] private float panicBackpedalSpeed = 2.4f;
     [SerializeField] private float panicStrafeSpeed = 2.8f;
     [SerializeField] private float panicSpinSpeed = 380f;
@@ -98,7 +109,10 @@ public class Visitor : MonoBehaviour
     [SerializeField] private float doorViewDistance = 14f;
     [SerializeField] private float doorSearchPriorityRadius = 22f;
     [SerializeField] private float doorActionDistance = 1.75f;
+    [SerializeField] private float doorInteractionRadiusBonus = 0.8f;
     [SerializeField] private float doorDetectRadius = 0.24f;
+    [SerializeField] private float doorDetectLowerHeight = 0.1f;
+    [SerializeField] private float doorDetectUpperHeight = 2.1f;
     [SerializeField] private float doorApproachOffset = 0.6f;
     [SerializeField] private float doorTransitOffset = 0.95f;
     [SerializeField] private float doorNavSampleRadius = 1.2f;
@@ -122,6 +136,9 @@ public class Visitor : MonoBehaviour
     [SerializeField] private AudioClip catchPlayerClip;
     [SerializeField, Range(0f, 1f)] private float catchPlayerVolume = 1f;
     [SerializeField] private float catchDistance = 1.2f;
+    [SerializeField] private float visibleCatchDistanceBonus = 0.55f;
+    [SerializeField] private float memoryCatchDistanceBonus = 0.25f;
+    [SerializeField] private float catchVerticalTolerance = 2.25f;
     [SerializeField] private float sceneReloadDelay = 0.1f;
 
     [Header("Debug Gizmos")]
@@ -171,6 +188,9 @@ public class Visitor : MonoBehaviour
     private PanicActionType _panicAction = PanicActionType.None;
     private float _panicActionUntil;
     private float _baseAgentOffset;
+    private float _lookSweepDirection = 1f;
+    private float _nextLookSweepSwitchTime;
+    private Collider[] _playerColliderCache;
 
     private Vector3 _debugGoalTarget;
     private bool _debugCanSeePlayer;
@@ -224,6 +244,8 @@ public class Visitor : MonoBehaviour
         _spawnPosition = transform.position;
         _lastStuckCheckPosition = FlattenY(transform.position);
         _nextStuckCheckTime = Time.time + stuckCheckInterval;
+        _lookSweepDirection = Random.value < 0.5f ? -1f : 1f;
+        _nextLookSweepSwitchTime = Time.time + Random.Range(idleLookSweepSwitchMinTime, idleLookSweepSwitchMaxTime);
         CacheVisualFollowOffsets();
         ResolvePlayerReference();
         InitializeSearchRoute();
@@ -320,8 +342,7 @@ public class Visitor : MonoBehaviour
 
         if (_goal == GoalType.ChasePlayer && player != null)
         {
-            float chaseDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(player.position));
-            if (chaseDistance <= catchDistance)
+            if (CanCatchPlayer())
             {
                 BeginCatchSequence();
                 return;
@@ -439,8 +460,19 @@ public class Visitor : MonoBehaviour
         RaycastHit hit;
         if (!TryFindDoorAhead(out door, out hit))
         {
-            _debugDoorAhead = null;
-            return;
+            if (_focusedDoor != null
+                && !_focusedDoor.IsKickedDown
+                && !_focusedDoor.IsOpen
+                && IsWithinDoorInteractRange(_focusedDoor, doorActionDistance + 0.2f))
+            {
+                door = _focusedDoor;
+                hit = default;
+            }
+            else if (!TryFindNearbyBlockingDoor(out door))
+            {
+                _debugDoorAhead = null;
+                return;
+            }
         }
         _debugDoorAhead = door;
 
@@ -450,9 +482,13 @@ public class Visitor : MonoBehaviour
             return;
         }
 
-        Vector3 doorActionPoint = GetDoorApproachPoint(door, transform.position);
-        float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(doorActionPoint));
-        if (distanceToDoor > doorActionDistance)
+        if (!IsWithinDoorInteractRange(door, doorActionDistance))
+        {
+            return;
+        }
+
+        Vector3 doorFocusPoint = GetDoorReferencePoint(door);
+        if (!RotateTowardsFlatPoint(doorFocusPoint, doorFocusTurnSpeed, Time.deltaTime, doorInteractFacingAngle))
         {
             return;
         }
@@ -525,15 +561,55 @@ public class Visitor : MonoBehaviour
             return;
         }
 
-        Vector3 desiredDirection = agent.desiredVelocity;
-        desiredDirection.y = 0f;
-        if (desiredDirection.sqrMagnitude <= 0.001f)
+        if (_goal == GoalType.ChasePlayer && player != null)
         {
+            RotateTowardsFlatPoint(player.position, Mathf.Max(turnSpeed, chaseSpeed * 65f), deltaTime);
             return;
         }
 
-        Quaternion targetRotation = Quaternion.LookRotation(desiredDirection.normalized, Vector3.up);
-        transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRotation, turnSpeed * deltaTime);
+        if ((_goal == GoalType.Door || _debugDoorAhead != null) && TryGetDoorLookTarget(out Vector3 doorLookPoint))
+        {
+            RotateTowardsFlatPoint(doorLookPoint, Mathf.Max(turnSpeed, doorFocusTurnSpeed), deltaTime);
+            return;
+        }
+
+        Vector3 desiredDirection = agent.desiredVelocity;
+        desiredDirection.y = 0f;
+        if (desiredDirection.sqrMagnitude > 0.001f)
+        {
+            Quaternion targetRotation = Quaternion.LookRotation(desiredDirection.normalized, Vector3.up);
+            transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRotation, turnSpeed * deltaTime);
+            return;
+        }
+
+        if (agent.hasPath && agent.path.corners.Length > 1)
+        {
+            Vector3 toCorner = agent.path.corners[1] - transform.position;
+            toCorner.y = 0f;
+            if (toCorner.sqrMagnitude > 0.001f)
+            {
+                Quaternion cornerRotation = Quaternion.LookRotation(toCorner.normalized, Vector3.up);
+                transform.rotation = Quaternion.RotateTowards(transform.rotation, cornerRotation, turnSpeed * deltaTime);
+                return;
+            }
+        }
+
+        if (_goal != GoalType.ChasePlayer)
+        {
+            if (Time.time >= _nextLookSweepSwitchTime)
+            {
+                _lookSweepDirection *= -1f;
+                float minSwitch = Mathf.Max(0.1f, idleLookSweepSwitchMinTime);
+                float maxSwitch = Mathf.Max(minSwitch, idleLookSweepSwitchMaxTime);
+                _nextLookSweepSwitchTime = Time.time + Random.Range(minSwitch, maxSwitch);
+            }
+
+            float sweepSpeed = Mathf.Max(0f, idleLookSweepTurnSpeed);
+            if (sweepSpeed > 0f)
+            {
+                transform.Rotate(0f, _lookSweepDirection * sweepSpeed * deltaTime, 0f, Space.Self);
+            }
+        }
     }
 
     private void UpdateStuckRecovery()
@@ -550,9 +626,19 @@ public class Visitor : MonoBehaviour
             return;
         }
 
+        Door pressuredDoor = GetActiveBlockedDoorForRecovery();
+        bool hasDoorPressure = pressuredDoor != null
+            && IsWithinDoorInteractRange(pressuredDoor, doorForceInteractDistance + 0.75f);
+
         bool isTryingToMove = agent.hasPath
             && !agent.pathPending
             && agent.remainingDistance > Mathf.Max(agent.stoppingDistance + 0.25f, 0.75f);
+
+        // If we're stuck near a blocked door, recovery should still run even with short/invalid paths.
+        if (!isTryingToMove && hasDoorPressure)
+        {
+            isTryingToMove = true;
+        }
 
         if (!isTryingToMove)
         {
@@ -572,32 +658,61 @@ public class Visitor : MonoBehaviour
         float moved = Vector3.Distance(currentPosition, _lastStuckCheckPosition);
         if (moved < stuckMinMoveDistance)
         {
-            _stuckAccumulatedTime += stuckCheckInterval;
+            float accumulationMultiplier = hasDoorPressure
+                ? Mathf.Max(1f, doorStuckAccumulationMultiplier)
+                : 1f;
+            _stuckAccumulatedTime += stuckCheckInterval * accumulationMultiplier;
         }
         else
         {
             _stuckAccumulatedTime = Mathf.Max(0f, _stuckAccumulatedTime - stuckCheckInterval * 0.5f);
         }
 
+        float thresholdMultiplier = hasDoorPressure
+            ? Mathf.Clamp(doorStuckThresholdMultiplier, 0.2f, 1f)
+            : 1f;
+        float unstickThreshold = Mathf.Max(0.2f, stuckTimeToTrigger * thresholdMultiplier);
+        float panicThreshold = Mathf.Max(unstickThreshold + 0.15f, panicStuckTime * thresholdMultiplier);
+
         _debugIsStuck = _stuckAccumulatedTime > 0.01f;
-        if (_stuckAccumulatedTime >= panicStuckTime && Time.time >= _nextPanicAllowedTime)
+        if (_stuckAccumulatedTime >= panicThreshold && Time.time >= _nextPanicAllowedTime)
         {
             TriggerPanicAction();
-            _stuckAccumulatedTime = stuckTimeToTrigger * 0.6f;
+            _stuckAccumulatedTime = unstickThreshold * 0.6f;
             _nextPanicAllowedTime = Time.time + panicActionCooldown;
             _lastStuckCheckPosition = currentPosition;
             _nextStuckCheckTime = Time.time + stuckCheckInterval;
             return;
         }
 
-        if (_stuckAccumulatedTime >= stuckTimeToTrigger)
+        if (_stuckAccumulatedTime >= unstickThreshold)
         {
             AttemptUnstick();
-            _stuckAccumulatedTime = Mathf.Min(_stuckAccumulatedTime, panicStuckTime * 0.75f);
+            _stuckAccumulatedTime = Mathf.Min(_stuckAccumulatedTime, panicThreshold * 0.75f);
         }
 
         _lastStuckCheckPosition = currentPosition;
         _nextStuckCheckTime = Time.time + stuckCheckInterval;
+    }
+
+    private Door GetActiveBlockedDoorForRecovery()
+    {
+        if (_focusedDoor != null && !_focusedDoor.IsKickedDown && !_focusedDoor.IsOpen)
+        {
+            return _focusedDoor;
+        }
+
+        if (_debugDoorAhead != null && !_debugDoorAhead.IsKickedDown && !_debugDoorAhead.IsOpen)
+        {
+            return _debugDoorAhead;
+        }
+
+        if (TryFindNearbyBlockingDoor(out Door nearbyDoor))
+        {
+            return nearbyDoor;
+        }
+
+        return null;
     }
 
     private bool HandlePanicAction(float deltaTime)
@@ -727,9 +842,7 @@ public class Visitor : MonoBehaviour
         RaycastHit hit;
         if (TryFindDoorAhead(out door, out hit))
         {
-            Vector3 doorActionPoint = GetDoorApproachPoint(door, transform.position);
-            float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(doorActionPoint));
-            if (distanceToDoor <= doorForceInteractDistance)
+            if (IsWithinDoorInteractRange(door, doorForceInteractDistance))
             {
                 if (door.IsLocked)
                 {
@@ -746,13 +859,11 @@ public class Visitor : MonoBehaviour
 
         if (TryFindNearbyBlockingDoor(out door))
         {
-            Vector3 doorActionPoint = GetDoorApproachPoint(door, transform.position);
-            float distanceToDoor = Vector3.Distance(FlattenY(transform.position), FlattenY(doorActionPoint));
-            if (distanceToDoor <= doorForceInteractDistance)
+            if (IsWithinDoorInteractRange(door, doorForceInteractDistance))
             {
                 if (door.IsLocked)
                 {
-                    KickDoor(door, doorActionPoint);
+                    KickDoor(door, GetDoorReferencePoint(door));
                 }
                 else if (!door.IsOpen)
                 {
@@ -917,6 +1028,71 @@ public class Visitor : MonoBehaviour
         return referencePoint;
     }
 
+    private bool IsWithinDoorInteractRange(Door door, float baseDistance)
+    {
+        if (door == null)
+        {
+            return false;
+        }
+
+        float allowedDistance = Mathf.Max(0.1f, baseDistance + Mathf.Max(0f, doorInteractionRadiusBonus));
+        Vector3 currentFlat = FlattenY(transform.position);
+
+        Vector3 approachPoint = GetDoorApproachPoint(door, transform.position);
+        float approachDistance = Vector3.Distance(currentFlat, FlattenY(approachPoint));
+        if (approachDistance <= allowedDistance)
+        {
+            return true;
+        }
+
+        Vector3 referencePoint = GetDoorReferencePoint(door);
+        float referenceDistance = Vector3.Distance(currentFlat, FlattenY(referencePoint));
+        return referenceDistance <= allowedDistance;
+    }
+
+    private bool RotateTowardsFlatPoint(Vector3 worldPoint, float maxTurnSpeed, float deltaTime, float requiredFacingAngle = -1f)
+    {
+        Vector3 toTarget = FlattenY(worldPoint - transform.position);
+        if (toTarget.sqrMagnitude <= 0.0001f)
+        {
+            return true;
+        }
+
+        Vector3 direction = toTarget.normalized;
+        Quaternion targetRotation = Quaternion.LookRotation(direction, Vector3.up);
+        transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRotation, Mathf.Max(0f, maxTurnSpeed) * deltaTime);
+
+        if (requiredFacingAngle < 0f)
+        {
+            return true;
+        }
+
+        float angle = Vector3.Angle(transform.forward, direction);
+        return angle <= requiredFacingAngle;
+    }
+
+    private bool TryGetDoorLookTarget(out Vector3 lookTarget)
+    {
+        lookTarget = transform.position + transform.forward;
+
+        Door candidate = null;
+        if (_focusedDoor != null && !_focusedDoor.IsKickedDown && !_focusedDoor.IsOpen)
+        {
+            candidate = _focusedDoor;
+        }
+        else if (_debugDoorAhead != null && !_debugDoorAhead.IsKickedDown && !_debugDoorAhead.IsOpen)
+        {
+            candidate = _debugDoorAhead;
+        }
+        else if (!TryFindNearbyBlockingDoor(out candidate))
+        {
+            return false;
+        }
+
+        lookTarget = GetDoorReferencePoint(candidate);
+        return true;
+    }
+
     private Collider[] GetDoorColliders(Door door)
     {
         if (door == null)
@@ -1075,7 +1251,6 @@ public class Visitor : MonoBehaviour
         foundDoor = null;
         bestHit = default;
 
-        Vector3 origin = eyes != null ? eyes.position : transform.position + Vector3.up * 1f;
         Vector3 direction = transform.forward;
         if (agent != null && agent.desiredVelocity.sqrMagnitude > 0.05f)
         {
@@ -1096,15 +1271,35 @@ public class Visitor : MonoBehaviour
             }
         }
 
-        int hitCount = Physics.SphereCastNonAlloc(
-            origin,
+        float lowerHeight = Mathf.Max(0f, doorDetectLowerHeight);
+        float upperHeight = Mathf.Max(lowerHeight + 0.1f, doorDetectUpperHeight);
+        Vector3 castBottom = transform.position + Vector3.up * lowerHeight;
+        Vector3 castTop = transform.position + Vector3.up * upperHeight;
+        float castDistance = Mathf.Max(doorActionDistance + 0.8f, 0.8f);
+
+        int hitCount = Physics.CapsuleCastNonAlloc(
+            castBottom,
+            castTop,
             doorDetectRadius,
             direction,
             _doorForwardHits,
-            Mathf.Max(doorActionDistance + 0.8f, 0.8f),
+            castDistance,
             doorMask,
             QueryTriggerInteraction.Ignore
         );
+
+        if (hitCount == 0 && eyes != null)
+        {
+            hitCount = Physics.SphereCastNonAlloc(
+                eyes.position,
+                doorDetectRadius,
+                direction,
+                _doorForwardHits,
+                castDistance,
+                doorMask,
+                QueryTriggerInteraction.Ignore
+            );
+        }
 
         float nearestDistance = float.MaxValue;
         for (int i = 0; i < hitCount; i++)
@@ -1172,11 +1367,51 @@ public class Visitor : MonoBehaviour
             return false;
         }
 
-        Vector3 playerPoint = player.position + Vector3.up * playerEyeOffset;
-        return CanSeePoint(playerPoint, player);
+        Vector3 originFlat = FlattenY(transform.position);
+        Vector3 playerFlat = FlattenY(player.position);
+        float horizontalDistance = Vector3.Distance(originFlat, playerFlat);
+
+        Vector3 eyePoint = player.position + Vector3.up * playerEyeOffset;
+        if (CanSeePoint(eyePoint, player))
+        {
+            return true;
+        }
+
+        Vector3 chestPoint = player.position + Vector3.up * playerChestOffset;
+        if (CanSeePoint(chestPoint, player))
+        {
+            return true;
+        }
+
+        Vector3 footPoint = player.position + Vector3.up * playerFootOffset;
+        if (CanSeePoint(footPoint, player))
+        {
+            return true;
+        }
+
+        if (horizontalDistance <= Mathf.Max(0.5f, closeRangeSightDistance))
+        {
+            float boostedAngle = Mathf.Clamp(viewAngle + Mathf.Max(0f, closeRangeViewAngleBonus), 5f, 179f);
+            if (CanSeePoint(eyePoint, player, viewDistance, boostedAngle))
+            {
+                return true;
+            }
+
+            if (CanSeePoint(chestPoint, player, viewDistance, boostedAngle))
+            {
+                return true;
+            }
+
+            if (CanSeePoint(footPoint, player, viewDistance, boostedAngle))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private bool CanSeePoint(Vector3 point, Transform expectedTransform)
+    private bool CanSeePoint(Vector3 point, Transform expectedTransform, float maxDistance = -1f, float maxViewAngle = -1f)
     {
         if (eyes == null)
         {
@@ -1186,13 +1421,15 @@ public class Visitor : MonoBehaviour
         Vector3 origin = eyes.position;
         Vector3 toPoint = point - origin;
         float distance = toPoint.magnitude;
-        if (distance <= 0.001f || distance > viewDistance)
+        float allowedDistance = maxDistance > 0f ? maxDistance : viewDistance;
+        if (distance <= 0.001f || distance > allowedDistance)
         {
             return false;
         }
 
         Vector3 direction = toPoint / distance;
-        if (Vector3.Angle(eyes.forward, direction) > viewAngle * 0.5f)
+        float allowedAngle = maxViewAngle > 0f ? maxViewAngle : viewAngle;
+        if (Vector3.Angle(eyes.forward, direction) > allowedAngle * 0.5f)
         {
             return false;
         }
@@ -1209,6 +1446,87 @@ public class Visitor : MonoBehaviour
         return true;
     }
 
+    private bool CanCatchPlayer()
+    {
+        if (player == null)
+        {
+            return false;
+        }
+
+        float catchRange = Mathf.Max(0.1f, catchDistance);
+        if (_debugCanSeePlayer)
+        {
+            catchRange += Mathf.Max(0f, visibleCatchDistanceBonus);
+        }
+        else if (_hasPlayerMemory)
+        {
+            catchRange += Mathf.Max(0f, memoryCatchDistanceBonus);
+        }
+
+        Vector3 visitorPoint = transform.position + Vector3.up * 0.9f;
+        Vector3 playerPoint = GetClosestPointOnPlayer(visitorPoint);
+
+        float flatDistance = Vector3.Distance(FlattenY(transform.position), FlattenY(playerPoint));
+        float verticalDelta = Mathf.Abs(playerPoint.y - transform.position.y);
+        if (verticalDelta > Mathf.Max(0.3f, catchVerticalTolerance))
+        {
+            return false;
+        }
+
+        return flatDistance <= catchRange;
+    }
+
+    private Vector3 GetClosestPointOnPlayer(Vector3 fromPoint)
+    {
+        if (player == null)
+        {
+            return fromPoint;
+        }
+
+        Collider[] colliders = GetPlayerColliders();
+        if (colliders == null || colliders.Length == 0)
+        {
+            return player.position + Vector3.up * playerChestOffset;
+        }
+
+        Vector3 closestPoint = player.position;
+        float bestDistance = float.MaxValue;
+        for (int i = 0; i < colliders.Length; i++)
+        {
+            Collider c = colliders[i];
+            if (c == null || !c.enabled)
+            {
+                continue;
+            }
+
+            Vector3 candidate = c.ClosestPoint(fromPoint);
+            float distance = (candidate - fromPoint).sqrMagnitude;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                closestPoint = candidate;
+            }
+        }
+
+        return closestPoint;
+    }
+
+    private Collider[] GetPlayerColliders()
+    {
+        if (player == null)
+        {
+            _playerColliderCache = null;
+            return null;
+        }
+
+        if (_playerColliderCache == null || _playerColliderCache.Length == 0)
+        {
+            _playerColliderCache = player.GetComponentsInChildren<Collider>(true);
+        }
+
+        return _playerColliderCache;
+    }
+
     private void ResolvePlayerReference()
     {
         if (player != null)
@@ -1220,6 +1538,7 @@ public class Visitor : MonoBehaviour
         if (playerObject != null)
         {
             player = playerObject.transform;
+            _playerColliderCache = null;
         }
     }
 

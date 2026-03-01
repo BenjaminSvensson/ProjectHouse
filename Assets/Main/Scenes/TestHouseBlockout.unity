@@ -1657,11 +1657,11 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 7065582727866346469, guid: 1ffef486999952f40a4129cb80831b88, type: 3}
       propertyPath: m_LocalScale.z
-      value: 1.2471358
+      value: 1.4950309
       objectReference: {fileID: 0}
     - target: {fileID: 7065582727866346469, guid: 1ffef486999952f40a4129cb80831b88, type: 3}
       propertyPath: m_LocalPosition.x
-      value: -10.488
+      value: -10.711
       objectReference: {fileID: 0}
     - target: {fileID: 7065582727866346469, guid: 1ffef486999952f40a4129cb80831b88, type: 3}
       propertyPath: m_LocalPosition.y
@@ -2988,7 +2988,7 @@ GameObject:
   - component: {fileID: 594884486}
   - component: {fileID: 594884485}
   - component: {fileID: 594884484}
-  m_Layer: 0
+  m_Layer: 2
   m_Name: Cube (12)
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -4226,12 +4226,12 @@ MonoBehaviour:
   agent: {fileID: 906417353}
   audioSource: {fileID: 906417352}
   visualRoot: {fileID: 1047054388}
-  viewDistance: 26
-  viewAngle: 80
+  viewDistance: 28
+  viewAngle: 35
   visionBlockerMask:
     serializedVersion: 2
     m_Bits: 257
-  playerEyeOffset: 1
+  playerEyeOffset: 0
   playerMemoryDuration: 7
   investigateRadius: 4.5
   investigatePointReachedDistance: 1.35
@@ -4279,7 +4279,10 @@ MonoBehaviour:
   doorViewDistance: 14
   doorSearchPriorityRadius: 22
   doorActionDistance: 1.75
+  doorInteractionRadiusBonus: 0.8
   doorDetectRadius: 0.24
+  doorDetectLowerHeight: 0.1
+  doorDetectUpperHeight: 2.1
   doorApproachOffset: 0.6
   doorTransitOffset: 0.95
   doorNavSampleRadius: 1.2
@@ -4441,7 +4444,7 @@ NavMeshAgent:
   m_GameObject: {fileID: 906417348}
   m_Enabled: 1
   m_AgentTypeID: 0
-  m_Radius: 0.5
+  m_Radius: 0.2
   m_Speed: 3.5
   m_Acceleration: 8
   avoidancePriority: 50
@@ -4450,7 +4453,7 @@ NavMeshAgent:
   m_AutoTraverseOffMeshLink: 1
   m_AutoBraking: 1
   m_AutoRepath: 1
-  m_Height: 2
+  m_Height: 1
   m_BaseOffset: 0
   m_WalkableMask: 4294967295
   m_ObstacleAvoidanceType: 4
@@ -5482,7 +5485,7 @@ Transform:
   m_GameObject: {fileID: 1152047702}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -5.495, y: 1.31, z: -1.757}
+  m_LocalPosition: {x: -5.424, y: 1.31, z: -1.757}
   m_LocalScale: {x: 7.500906, y: 3.132524, z: 0.39584976}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -6922,7 +6925,7 @@ Transform:
   m_GameObject: {fileID: 1718025438}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -12.87, y: 1.31, z: -1.757}
+  m_LocalPosition: {x: -13.094, y: 1.31, z: -1.757}
   m_LocalScale: {x: 4.8026576, y: 3.132524, z: 0.39584976}
   m_ConstrainProportionsScale: 0
   m_Children: []
