@@ -252,9 +252,10 @@ MonoBehaviour:
   lockedSound: {fileID: 8300000, guid: e3d34b4a2443c894fb388a9808f65b45, type: 3}
   kickedDownSound: {fileID: 0}
   soundVolume: 1
-  kickDownRigidbody: {fileID: 0}
-  addRigidbodyIfMissing: 1
-  kickDownTorque: 35
+  kickDownAngle: 140
+  kickDownRotateSpeed: 460
+  kickDirectionFromForce: 1
+  disableCollisionOnKickDown: 1
 --- !u!82 &4032157243148879104
 AudioSource:
   m_ObjectHideFlags: 0
@@ -598,9 +599,10 @@ MonoBehaviour:
   lockedSound: {fileID: 8300000, guid: e3d34b4a2443c894fb388a9808f65b45, type: 3}
   kickedDownSound: {fileID: 0}
   soundVolume: 1
-  kickDownRigidbody: {fileID: 0}
-  addRigidbodyIfMissing: 1
-  kickDownTorque: 35
+  kickDownAngle: 140
+  kickDownRotateSpeed: 460
+  kickDirectionFromForce: 1
+  disableCollisionOnKickDown: 1
 --- !u!82 &7290601563677152271
 AudioSource:
   m_ObjectHideFlags: 0
@@ -717,8 +719,8 @@ BoxCollider:
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Size: {x: 0.010053591, y: 0.15901838, z: 0.17920877}
-  m_Center: {x: 0.016135866, y: -0.06414173, z: -0.012814912}
+  m_Size: {x: 0.010053591, y: 0.19626887, z: 0.17920874}
+  m_Center: {x: 0.016135886, y: -0.045516573, z: -0.0128149185}
 --- !u!4 &8874907390646726241 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: 23d9feb4e1639e7438c0c4e4f788f41b, type: 3}
